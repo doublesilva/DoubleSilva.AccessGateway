@@ -1,0 +1,12 @@
+# Saídas da coleta de inventário (podem conter dados operacionais)
+inventory-*.txt
+
+# Segredos e material criptográfico nunca entram no Git
+.env
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+*.sqlite3
+*.sqlite3-*
