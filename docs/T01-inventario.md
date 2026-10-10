@@ -6,8 +6,8 @@ porta, regra de firewall ou registro DNS foi alterado. Segredos não foram copia
 apenas por nome e os valores sensíveis das configurações foram redigidos na coleta.
 
 Complementado no mesmo dia com [`collect-readonly-part2.sh`](../scripts/inventory/collect-readonly-part2.sh).
-Os itens marcados com **[PENDENTE]** dependem de `collect-readonly-part2.sh ca deploy dns`, porque a saída anterior
-foi truncada nessas seções.
+Restam dois itens **[PENDENTE]** (agendamentos e reescritas do AdGuard), coletáveis com
+`collect-readonly-part2.sh schedule dns`. Nenhum deles bloqueia a T02 (ver §10).
 
 ## 1. Servidor
 
@@ -61,8 +61,9 @@ foi truncada nessas seções.
   - as aplicações, como `/etc/homeautomation/certs/caddy-local-root.crt` (API, Panel, OutHome) e `/etc/jarvis/certs`
     (Jarvis API, via `SSL_CERT_DIR`);
   - os dispositivos clientes (navegadores, TV, celulares), por `http://cert.home/caddy-root.crt`.
-- **Achado:** a rota `cert.home` serve `/config/casa-dashboard/caddy-root.crt`, mas esse arquivo não aparece na
-  listagem de `/opt/caddy/config/casa-dashboard`. A rota provavelmente responde 404.
+- **Achado (causa identificada):** a rota `cert.home` serve `/config/casa-dashboard/caddy-root.crt`, mas o
+  `deploy-homeautomation` sincroniza esse diretório com `rsync --delete` a partir do repositório do HomeAutomation,
+  que não contém o `.crt`. A cada deploy o arquivo é apagado; hoje a rota responde 404.
 
 | Certificado | Subject | Validade | SHA-256 |
 | --- | --- | --- | --- |
@@ -71,8 +72,8 @@ foi truncada nessas seções.
 | Folhas (20 hosts) | um por host do Caddyfile | ~12 h, renovação automática | — |
 
 - `/etc/homeautomation/certs/caddy-local-root.crt` tem **o mesmo fingerprint da raiz** (confirmado).
-- `/etc/jarvis/certs/caddy-local-root.crt` (631 bytes, mais o symlink de hash `fe4a7346.0`) tem o mesmo tamanho
-  da raiz. **[PENDENTE]** confirmar o fingerprint: o diretório é `root:1654 750` e o glob do script rodou sem `sudo` (corrigido).
+- `/etc/jarvis/certs/caddy-local-root.crt` (`root:1654 440`, mais o symlink de hash `fe4a7346.0`) também tem
+  **o mesmo fingerprint da raiz** (confirmado).
 - A PKI fica em `/opt/caddy/data/caddy/pki/authorities/local/` (`root.crt`, `root.key`, `intermediate.crt`,
   `intermediate.key`, todos `root:root 600`).
 - **Achado crítico:** o backup diário (`/usr/local/sbin/backup-home-server`) **não inclui `/opt/caddy`**. Se a chave
@@ -199,18 +200,23 @@ Os digests dos client secrets estão inline em `configuration.yml`. Não são te
 | HomeAutomation OutHome | Authority, client `homeautomation-outhome`, callback `https://casa.home/signin-oidc`; confia na CA do Caddy | `docker-compose.yml` |
 | Jarvis API | `https://auth.home.doublesilva.com/api/oidc/token`, client `jarvis-home`; confia na CA via `/etc/jarvis/certs` | `docker-compose.yml` do Jarvis |
 | Jarvis Web | publicado via `jarvis.home.doublesilva.com` com FA | Caddyfile |
-| Dispositivos clientes | confiam na raiz da CA interna; resolvem os hosts via AdGuard | DNS local **[PENDENTE: reescritas]** |
+| Dispositivos clientes | confiam na raiz da CA interna; resolvem os hosts via AdGuard (LAN e Tailscale) | AdGuard (§8.3) |
 | Uptime Kuma | monitores HTTPS a cada minuto em `adguard.home.doublesilva.com` e `portainer.home.doublesilva.com`, entre outros; esperam 302 do `forward_auth` (vistos no log do Authelia vindos de `172.20.0.2`) | configuração do Kuma; regra ufw `443/tcp from 172.20.0.0/16` |
 | Backup diário | `backup-home-server` arquiva `/home/diego/containers` (inclui configuração, segredos e SQLite do Authelia, copiados a quente) e envia via restic ao compartilhamento Windows. Não inclui `/opt/caddy` | `/usr/local/sbin/backup-home-server` |
-| Monitor `smoke-status` | grava `/opt/caddy/config/smoke-status/status.json` periodicamente; verifica container `caddy`, Caddyfile válido, `casa.home`, API e Blazor | **[PENDENTE: script/timer responsável]** |
+| Smoke test | `home-smoke-publish` (Python, root) executa `home-smoke-test`, grava `status.json` e `index.html` em `/opt/caddy/config/smoke-status` e envia heartbeat ao Kuma (push URL em `/etc/home-smoke-test/kuma-push-url`, TLS não verificado). Depende do **nome do container `caddy`** (`docker inspect` e `docker exec caddy caddy validate --config /etc/caddy/Caddyfile`), de `casa.home` e `panel.home` em `192.168.0.162` e `100.115.190.21` e de `home-server-docker-firewall.service` | `/usr/local/sbin/home-smoke-publish`, `/usr/local/sbin/home-smoke-test`; agendamento **[PENDENTE]** |
 
 Os containers das aplicações resolvem `auth.home.doublesilva.com` pelo DNS do host (AdGuard em `192.168.0.162:53`).
 O tráfego chega ao Caddy em `192.168.0.162:443`, liberado no ufw por sub-rede Docker (§8), e é encaminhado ao Authelia. Portanto, **nenhuma aplicação fala diretamente com
 `127.0.0.1:9091`**: trocar o gateway não exige mudar as aplicações, desde que o hostname, o issuer, a CA e a chave
 de assinatura sejam mantidos.
 
-Baseline do monitor `smoke-status` em 2026-10-10 17:57: 15 PASS e 3 FAIL. As falhas (`API health` LAN/Tailscale com
-HTTP 404 e `Blazor negotiate` com HTTP 301) **já existiam antes da migração** e não devem ser atribuídas a ela.
+Baseline do smoke test em 2026-10-10 17:57: 15 PASS e 3 FAIL. As 3 falhas são **defeitos do próprio teste**, não
+indisponibilidade, e já existiam antes da migração:
+
+- `API health` (LAN e Tailscale) consulta `https://casa.home/api/health`, mas `casa.home` aponta para o OutHome
+  (`:5300`), que não expõe esse caminho → 404.
+- `Blazor negotiate` consulta `https://panel.home/_blazor/negotiate`, mas `panel.home` responde 301 para
+  `panel.home.doublesilva.com` → 301.
 
 ## 7. Pipelines e deployment
 

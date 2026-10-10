@@ -6,9 +6,9 @@
 #   - de certificados imprime somente subject/issuer/validade/fingerprint; chaves privadas só por nome.
 #
 # Uso, no servidor (a saída NÃO deve ser versionada). Sem argumentos executa todas as seções;
-# com argumentos, só as indicadas (authelia, ca, network, ports, firewall, tailscale, deploy, dns):
+# com argumentos, só as indicadas (authelia, ca, network, ports, firewall, tailscale, deploy, schedule, dns):
 #   bash collect-readonly-part2.sh > ~/inventory-part2.txt
-#   bash collect-readonly-part2.sh deploy dns > ~/inventory-part3.txt
+#   bash collect-readonly-part2.sh schedule dns > ~/inventory-part4.txt
 set -u
 
 section() { printf '\n===== %s =====\n' "$1"; }
@@ -22,7 +22,7 @@ redact() {
     skip { next }
     { print }
   ' | sed -E \
-    -e 's/((secret|password|passwd|token|private|_key|key_|hmac|encryption|jwt|hash|credential|apikey|api_key)[A-Za-z0-9_]*["]?[[:space:]]*[:=][[:space:]]*).+/\1<REDACTED>/I' \
+    -e '/NOPASSWD:/!s/((secret|password|passwd|token|private|_key|key_|hmac|encryption|jwt|hash|credential|apikey|api_key)[A-Za-z0-9_]*["]?[[:space:]]*[:=][[:space:]]*).+/\1<REDACTED>/I' \
     -e 's/(basic_?auth[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+)[^[:space:]]+/\1<REDACTED>/I' \
     -e 's/\$(argon2id?|pbkdf2[^$]*|2[aby]|6|5)\$[^[:space:]"]+/<HASH REDACTED>/g'
 }
@@ -121,9 +121,15 @@ s_deploy() {
       deploy-*|*smoke*|*caddy*|*authelia*|*gateway*|*cert*) show_file "$f" ;;
     esac
   done
-  run ls -la /srv /srv/homeautomation-deploy /srv/jarvis-deploy
-  $SUDO ls -la /etc/sudoers.d 2>&1
-  for f in $($SUDO ls /etc/sudoers.d 2>/dev/null); do is_backup "$f" || show_file "/etc/sudoers.d/$f"; done
+  run ls -la /srv /srv/jarvis-deploy
+  run $SUDO ls -la /srv/homeautomation-deploy
+}
+
+s_schedule() {
+  section "sudoers, agendamentos e units"
+  for f in $($SUDO ls /etc/sudoers.d 2>/dev/null); do
+    [ "$f" = README ] || is_backup "$f" || show_file "/etc/sudoers.d/$f"
+  done
   run crontab -l
   run $SUDO crontab -l
   for f in /etc/cron.d/*; do is_backup "$f" || show_file "$f"; done
@@ -137,6 +143,10 @@ s_deploy() {
       | grep -iE 'smoke|caddy|authelia|backup|restic|deploy|firewall'); do
     printf -- '--- unit %s\n' "$u"; systemctl cat "$u" 2>&1 | redact
   done
+  printf -- '--- ferramentas para snapshot do SQLite\n'
+  for t in sqlite3 restic age gpg; do printf '  %s: %s\n' "$t" "$(command -v "$t" || echo ausente)"; done
+  printf -- '--- staging do backup (somente nomes e permissões)\n'
+  $SUDO ls -la /var/backups/home-server 2>&1
 }
 
 s_dns() {
@@ -158,7 +168,7 @@ s_dns() {
   fi
 }
 
-ALL="authelia ca network ports firewall tailscale deploy dns"
+ALL="authelia ca network ports firewall tailscale deploy schedule dns"
 for s in ${*:-$ALL}; do
   case " $ALL " in
     *" $s "*) "s_$s" ;;
