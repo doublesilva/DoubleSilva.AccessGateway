@@ -6,8 +6,7 @@ porta, regra de firewall ou registro DNS foi alterado. Segredos não foram copia
 apenas por nome e os valores sensíveis das configurações foram redigidos na coleta.
 
 Complementado no mesmo dia com [`collect-readonly-part2.sh`](../scripts/inventory/collect-readonly-part2.sh).
-Restam dois itens **[PENDENTE]** (agendamentos e reescritas do AdGuard), coletáveis com
-`collect-readonly-part2.sh schedule dns`. Nenhum deles bloqueia a T02 (ver §10).
+Concluído no mesmo dia com [`collect-remaining.sh`](../scripts/inventory/collect-remaining.sh). **Não há pendências de coleta.**
 
 ## 1. Servidor
 
@@ -203,7 +202,7 @@ Os digests dos client secrets estão inline em `configuration.yml`. Não são te
 | Dispositivos clientes | confiam na raiz da CA interna; resolvem os hosts via AdGuard (LAN e Tailscale) | AdGuard (§8.3) |
 | Uptime Kuma | monitores HTTPS a cada minuto em `adguard.home.doublesilva.com` e `portainer.home.doublesilva.com`, entre outros; esperam 302 do `forward_auth` (vistos no log do Authelia vindos de `172.20.0.2`) | configuração do Kuma; regra ufw `443/tcp from 172.20.0.0/16` |
 | Backup diário | `backup-home-server` arquiva `/home/diego/containers` (inclui configuração, segredos e SQLite do Authelia, copiados a quente) e envia via restic ao compartilhamento Windows. Não inclui `/opt/caddy` | `/usr/local/sbin/backup-home-server` |
-| Smoke test | `home-smoke-publish` (Python, root) executa `home-smoke-test`, grava `status.json` e `index.html` em `/opt/caddy/config/smoke-status` e envia heartbeat ao Kuma (push URL em `/etc/home-smoke-test/kuma-push-url`, TLS não verificado). Depende do **nome do container `caddy`** (`docker inspect` e `docker exec caddy caddy validate --config /etc/caddy/Caddyfile`), de `casa.home` e `panel.home` em `192.168.0.162` e `100.115.190.21` e de `home-server-docker-firewall.service` | `/usr/local/sbin/home-smoke-publish`, `/usr/local/sbin/home-smoke-test`; agendamento **[PENDENTE]** |
+| Smoke test | `home-smoke-publish` (Python, root) executa `home-smoke-test`, grava `status.json` e `index.html` em `/opt/caddy/config/smoke-status` e envia heartbeat ao Kuma (push URL em `/etc/home-smoke-test/kuma-push-url`, TLS não verificado). Depende do **nome do container `caddy`** (`docker inspect` e `docker exec caddy caddy validate --config /etc/caddy/Caddyfile`), de `casa.home` e `panel.home` em `192.168.0.162` e `100.115.190.21` e de `home-server-docker-firewall.service` | `/usr/local/sbin/home-smoke-publish`, `/usr/local/sbin/home-smoke-test`; disparado pelo `home-smoke-publish.timer` a cada 5 min |
 
 Os containers das aplicações resolvem `auth.home.doublesilva.com` pelo DNS do host (AdGuard em `192.168.0.162:53`).
 O tráfego chega ao Caddy em `192.168.0.162:443`, liberado no ufw por sub-rede Docker (§8), e é encaminhado ao Authelia. Portanto, **nenhuma aplicação fala diretamente com
@@ -218,6 +217,10 @@ indisponibilidade, e já existiam antes da migração:
 - `Blazor negotiate` consulta `https://panel.home/_blazor/negotiate`, mas `panel.home` responde 301 para
   `panel.home.doublesilva.com` → 301.
 
+Consequência: como `home-smoke-publish` envia `status=down` sempre que há qualquer FAIL, **o monitor push do Kuma
+para o smoke test está permanentemente "down"** e não serve hoje como alarme do gateway. Corrigir o teste é uma tarefa
+separada; para o cutover, o critério é a contagem (§5 do plano), não o estado do monitor.
+
 ## 7. Pipelines e deployment
 
 - **HomeAutomation** (`.github/workflows/deploy.yml`): push em `main` → Tailscale (`tag:homeautomation-ci`) →
@@ -227,11 +230,66 @@ indisponibilidade, e já existiam antes da migração:
   `sudo /usr/local/sbin/deploy-jarvis <component|all>`.
 - Nenhum dos dois workflows referencia o Caddy ou o Authelia. **Caddy e Authelia não têm pipeline**: são mantidos
   manualmente, como mostram os backups `*.bak*`.
-- O repositório HomeAutomation versiona `infrastructure/caddy/casa-dashboard/`, e os arquivos em
-  `/opt/caddy/config/casa-dashboard` têm data de 2026-10-08 e dono `root`. **[PENDENTE]** confirmar se o
-  `deploy-homeautomation` copia esses arquivos para `/opt/caddy/config`; se copiar, é uma dependência de caminho a preservar.
-- **[PENDENTE]** conteúdo de `/usr/local/sbin/deploy-*`, sudoers, cron e timers.
-- Outros scripts do servidor relevantes para o gateway:
+
+### 7.1 `deploy-homeautomation` (`root:root 750`)
+
+- Lock em `/run/lock/homeautomation-deploy.lock`. Origem: `/srv/homeautomation-deploy/release` (dono `deploy`).
+  Destino: `/home/diego/containers/homeautomation`.
+- Bloqueia releases com symlinks, `.env`, chaves de Data Protection, banco da API, `password_file` do Mosquitto,
+  `mediamtx.yml`, `*.db*`, `*.key`, `*.pfx` e `*.p12`. Exige que o `.env`, as chaves e o `mediamtx.yml` de produção existam.
+- Pre-flight em `/var/tmp`: `docker compose -p homeautomation config -q` e `build`. Depois, `rsync --delete` para o
+  destino, preservando dados e segredos.
+- **Dependência do gateway:** publica `infrastructure/caddy/casa-dashboard/` em **`/opt/caddy/config/casa-dashboard`**
+  (`install -d -o root`, `rsync -rlt --delete --chown=root:root`). É o único ponto em que um pipeline de aplicação
+  escreve no diretório do Caddy, e é a causa do `caddy-root.crt` ausente (§3).
+- `docker compose -p homeautomation up -d --remove-orphans` afeta apenas o projeto `homeautomation`; Caddy e Authelia
+  são projetos separados e não são tocados.
+- Health check em `http://127.0.0.1:5100/health` (direto na API, sem passar pelo gateway).
+
+### 7.2 `deploy-jarvis` (`root:root 755`)
+
+- Origem `/srv/jarvis-deploy/release`, env em `/etc/jarvis/jarvis.env`, projeto `jarvis`, sempre com `--profile speaker`.
+- Por componente: `up -d --build --no-deps <serviço>`; em `all`: `up -d --build --remove-orphans`. Aguarda healthcheck por até 120 s.
+- **Nenhuma dependência do gateway** (não referencia Caddy, Authelia nem `/opt/caddy`).
+- Os volumes `release_jarvis-*` são resquícios de uma execução com nome de projeto `release`. Não afetam o gateway.
+
+### 7.3 sudoers
+
+| Arquivo | Conteúdo |
+| --- | --- |
+| `/etc/sudoers.d/homeautomation-deploy` (`root:root 640`) | `deploy ALL=(root) NOPASSWD: /usr/local/sbin/deploy-homeautomation` |
+| `/etc/sudoers.d/jarvis-deploy` (`root:root 440`) | `deploy ALL=(root) NOPASSWD: /usr/local/sbin/deploy-jarvis` |
+
+Confirmado em texto. Não há restrição de argumentos (o `deploy-jarvis` recebe o componente). O usuário `deploy`
+**não tem permissão para operar o gateway**. Não há crontab de `diego` nem de `root`; `/etc/cron.d` contém só
+`e2scrub_all` e `sysstat`.
+
+### 7.4 Escritores de `/opt/caddy/config`
+
+| Caminho | Escrito por | Servido pelo Caddy? |
+| --- | --- | --- |
+| `casa-dashboard/` | `deploy-homeautomation` (a cada push em `main` do HomeAutomation), `rsync --delete` | apenas `/caddy-root.crt` via `http://cert.home`; o dashboard em si não tem rota |
+| `smoke-status/` | `home-smoke-publish` (root, escrita atômica) | não há rota; consumido via heartbeat do Kuma |
+| `netdata-dashboard/` | manual (2026-09-19) | sim: `admin.home.doublesilva.com` e `netdata.home` |
+| `caddy/autosave.json` | o próprio Caddy | — |
+
+### 7.5 Outros scripts do servidor
+
+- `home-smoke-test` e `home-smoke-publish`: descritos no §6.
+- Units systemd relevantes:
+
+  | Unit | Disparo | Executa | Observações |
+  | --- | --- | --- | --- |
+  | `home-smoke-publish.timer` → `.service` | 2 min após o boot e depois a cada 5 min | `/usr/local/sbin/home-smoke-publish` | depende de `docker`, `tailscaled` e do firewall |
+  | `home-server-backup.timer` → `.service` | diariamente às **12:30** (`Persistent=true`) | `/usr/local/sbin/backup-home-server` | `Restart=on-failure` a cada 30 min. Na coleta (18:29) o serviço estava `activating`, 6 h após o disparo: provável falha com retentativas. Ver §9 |
+  | `home-server-docker-firewall.service` | no start do Docker (`PartOf=docker.service`, `RemainAfterExit`) | `/usr/local/sbin/configure-docker-firewall` | `enabled/active` |
+
+- **Efeito do backup no gateway:** durante a cópia, o `backup-home-server` **para `adguard`, `portainer` e
+  `uptime-kuma`**. Com o AdGuard parado, LAN e Tailscale ficam sem resolução de nomes; na prática, o gateway fica
+  inacessível pelos nomes durante esse intervalo, e isso se repete a cada retentativa.
+- Staging do backup: `/var/backups/home-server` é `root:root 700` (arquivos `644` dentro); o restic criptografa o envio.
+- Ferramentas no host: `restic` e `gpg` presentes; `sqlite3` e `age` ausentes.
+- Outros scripts relevantes para o gateway:
   - `/usr/local/sbin/backup-home-server` (restic): para `uptime-kuma`, `portainer` e `adguard` durante o backup; não
     toca no Caddy nem no Authelia; arquiva `/home/diego/containers`, mas não `/opt/caddy`.
   - `/usr/local/sbin/configure-docker-firewall`: mantém as chains `HS-DOCKER-FILTER` (LAN em `br0`, restrições
@@ -299,7 +357,21 @@ Já colocar as aplicações em novas redes Docker exigiria mudar o firewall.
 
 - Tailscale: nó `home-server` (`100.115.190.21`); sem `tailscale serve` nem `funnel`.
 - O DNS dos clientes Tailscale para `100.115.190.21:53` sofre DNAT para o AdGuard (`HS-TAILSCALE-DNS`).
-- **[PENDENTE]** reescritas do AdGuard para `*.home.doublesilva.com` e `*.home`.
+- O smoke test confirma que `casa.home` resolve para `192.168.0.162`, tanto pelo DNS da LAN quanto pelo do Tailscale.
+- Reescritas do AdGuard (`/home/diego/containers/adguard/conf/AdGuardHome.yaml`), todas habilitadas:
+
+  | Domínio | Resposta |
+  | --- | --- |
+  | `*.home.doublesilva.com` (curinga) | `192.168.0.162` |
+  | `home.doublesilva.com` | `192.168.0.162` (sem site no Caddy) |
+  | `casa.home`, `ha.home`, `frigate.home`, `portainer.home`, `mediamtx.home`, `kuma.home`, `adguard.home`, `panel.home`, `netdata.home`, `cert.home` | `192.168.0.162` |
+  | `router.home` | `192.168.0.1` (não passa pelo gateway) |
+
+- Resolução confirmada no host para os 11 hosts `*.home.doublesilva.com` e os 10 `*.home` do Caddyfile.
+- O curinga faz com que novas aplicações em `*.home.doublesilva.com` não precisem de mudança no DNS, só de rota no
+  gateway. Já um novo host `.home` precisa de uma reescrita explícita.
+- O plano não altera o DNS: Blue e Green respondem no mesmo IP e nas mesmas portas. O AdGuard é ponto único de
+  falha da resolução de nomes (e é parado pelo backup diário).
 
 ## 9. Achados de segurança (registrados; fora do escopo da migração)
 
@@ -311,8 +383,13 @@ A migração reproduzirá o comportamento atual 1:1. Qualquer correção destes 
 3. `tls_insecure_skip_verify` para Frigate e Portainer (loopback; risco baixo).
 4. Imagem `caddy:2` flutuante: recriar o container atual pode trocar a versão do Caddy sem aviso.
 5. Configuração do Authelia com dono `root` dentro de `/home/diego`, enquanto o compose e parte dos segredos pertencem a `diego`.
-6. A rota `cert.home` aponta para um arquivo de raiz que parece ausente.
+6. A rota `cert.home` responde 404 para a raiz da CA: o `deploy-homeautomation` apaga o arquivo a cada deploy (§3, §7.1).
 7. O Netdata escuta em `0.0.0.0:19999` e o ufw libera 19999 para a LAN e o Tailscale. Com isso, o `forward_auth` de
    `netdata.home.doublesilva.com` e `admin.home.doublesilva.com` pode ser contornado acessando a porta diretamente.
 8. A PKI do Caddy (chave privada da raiz) não está no backup.
 9. O backup copia o SQLite do Authelia com o serviço em execução; a cópia pode ficar inconsistente.
+10. O smoke test envia o heartbeat ao Kuma sem verificar TLS (`ssl._create_unverified_context`).
+11. A implantação do HomeAutomation escreve como `root` no diretório de configuração do gateway (`/opt/caddy/config`).
+12. O backup diário para o AdGuard (DNS) e repete o processo a cada 30 min em caso de falha. Na coleta, o serviço
+    estava em retentativa: vale verificar com `systemctl status home-server-backup.service` e
+    `journalctl -u home-server-backup` se os backups estão sendo concluídos.
