@@ -33,5 +33,8 @@ scripts/validate-local.sh          # caddy authelia compose snapshot ca e2e lint
 - [T03 — Runbook](docs/T03-runbook.md)
 - [CA interna — backup offline e restauração](docs/CA-restauracao.md)
 - [INFRA-01 — Diagnóstico do backup do Home Server](docs/INFRA-01-diagnostico-backup.md)
+- [INFRA-03.1 — Relatório do backup v2](docs/INFRA-03.1-relatorio.md) ·
+  [Implantação](docs/INFRA-03-implantacao.md) · [Restauração](docs/INFRA-03-restauracao-backup.md)
+  (código em `infra/home-server-backup/`; testes: `infra/home-server-backup/tests/run-tests.sh`)
 
 Segredos, chaves privadas, a PKI do Caddy e o banco do Authelia nunca são versionados (ver [.gitignore](.gitignore)).

@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# Backup do Home Server com restic — versão 2 (INFRA-03.1).
+#
+# Diferenças em relação à versão anterior:
+#   - verificação CIFS compatível com systemd automount (findmnt --mountpoint -t cifs; a versão anterior falhava
+#     sempre porque `findmnt -T` devolve autofs + cifs);
+#   - nenhum container é parado (AdGuard/DNS, Kuma e Portainer continuam no ar);
+#   - bancos SQLite copiados por snapshot consistente (Python em container descartável, sem rede, origem :ro);
+#     os arquivos vivos (*.db, -wal, -shm, -journal) são excluídos;
+#   - restic direto nos diretórios (incremental, deduplicado), sem tar intermediário no disco raiz;
+#   - escopo: configurações, CA, segredos, scripts, biometria Jarvis e histórico do portão; sem vídeo e caches;
+#   - retenção restrita à tag desta versão: snapshots anteriores são preservados;
+#   - heartbeat ao Kuma em sucesso (up) e em falha (down), sem expor a URL;
+#   - staging temporário removido sempre (trap), inclusive em erro ou interrupção.
+#
+# Uso (root):
+#   backup-home-server                executa o backup (usado pelo systemd)
+#   backup-home-server --dry-run      tudo, exceto gravar no repositório (restic backup --dry-run; sem forget)
+#   backup-home-server --check-destination   só verifica montagem CIFS e repositório
+#   backup-home-server --check [N%]   restic check --read-data-subset=N% (padrão 5%)
+# Configuração: /etc/home-server-backup/backup.conf (ou BACKUP_CONF).
+set -Eeuo pipefail
+umask 077
+
+BACKUP_CONF=${BACKUP_CONF:-/etc/home-server-backup/backup.conf}
+# shellcheck source=backup.conf
+. "$BACKUP_CONF"
+
+MODE=backup
+case "${1:-}" in
+  "") ;;
+  --dry-run) MODE="dry-run" ;;
+  --check-destination) MODE="check-destination" ;;
+  --check) MODE=check; CHECK_SUBSET=${2:-5%} ;;
+  *) echo "uso: backup-home-server [--dry-run|--check-destination|--check [N%]]" >&2; exit 2 ;;
+esac
+
+if [ -n "${RESTIC_CACHE_DIR:-}" ]; then
+  install -d -m 700 "$RESTIC_CACHE_DIR"
+  export RESTIC_CACHE_DIR
+fi
+
+log() { printf '[%s] %s\n' "$(date --iso-8601=seconds)" "$*"; }
+STAGE="inicialização"
+RUN_DIR=""
+
+restic_cmd() { restic --repo "$RESTIC_REPOSITORY" --password-file "$RESTIC_PASSWORD_FILE" "$@"; }
+
+# Heartbeat ao Uptime Kuma. A URL é lida do arquivo de configuração do curl e nunca impressa nem passada em argv.
+kuma_push() { # $1 = up|down, $2 = mensagem (sem segredos)
+  [ -r "$KUMA_PUSH_CONFIG" ] || { log "AVISO: $KUMA_PUSH_CONFIG ausente; Kuma não notificado."; return 0; }
+  local url
+  url=$(sed -nE 's/^[[:space:]]*url[[:space:]]*=?[[:space:]]*"?([^"[:space:]]+)"?.*$/\1/p' "$KUMA_PUSH_CONFIG" | head -1)
+  [ -n "$url" ] || { log "AVISO: URL do Kuma não encontrada no arquivo de configuração."; return 0; }
+  url=$(STATUS="$1" MSG="$2" URL="$url" python3 -c '
+import os, urllib.parse as u
+p = u.urlsplit(os.environ["URL"]); q = dict(u.parse_qsl(p.query, keep_blank_values=True))
+q.update(status=os.environ["STATUS"], msg=os.environ["MSG"][:200])
+print(u.urlunsplit((p.scheme, p.netloc, p.path, u.urlencode(q), p.fragment)))')
+  local tls=() rc=0 http
+  [ -r "${KUMA_CACERT:-}" ] && tls=(--cacert "$KUMA_CACERT")
+  http=$(printf 'url = "%s"\n' "$url" | curl --config - --fail --silent --retry 3 --retry-connrefused \
+           --retry-delay 3 --max-time 15 "${tls[@]}" --output /dev/null --write-out '%{http_code}' 2>/dev/null) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "Kuma notificado: $1"
+  else
+    # Somente o código do curl e o status HTTP: a URL (com o token) nunca é registrada.
+    log "AVISO: não foi possível notificar o Kuma ($1): curl=$rc http=${http:-000} ($(curl_reason "$rc"))."
+  fi
+}
+
+curl_reason() {
+  case "$1" in
+    6) echo "nome do host não resolvido" ;;
+    7) echo "conexão recusada" ;;
+    22) echo "resposta HTTP de erro" ;;
+    28) echo "tempo esgotado" ;;
+    35|60|77) echo "erro de TLS/certificado" ;;
+    *) echo "ver 'man curl', EXIT CODES" ;;
+  esac
+}
+
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
+    rm -rf --one-file-system -- "$RUN_DIR"
+    log "Staging temporário removido."
+  fi
+  if [ "$rc" -ne 0 ] && { [ "$MODE" = backup ] || [ "$MODE" = check ]; }; then
+    log "FALHA na etapa: $STAGE (código $rc)"
+    kuma_push down "Backup falhou: $STAGE"
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+fail() { log "ERRO: $*"; exit 1; }
+
+check_destination() {
+  STAGE="destino"
+  [ -d "$BACKUP_MOUNT" ] || fail "$BACKUP_MOUNT não existe."
+  if [ "$BACKUP_REQUIRE_FSTYPE" != none ]; then
+    # O acesso ao conteúdo dispara o systemd automount; o timeout de montagem (10 s) é do próprio fstab.
+    timeout 20 ls "$BACKUP_MOUNT/" >/dev/null 2>&1 || fail "compartilhamento do Windows indisponível."
+    # Com automount há duas montagens empilhadas (autofs + cifs): procurar especificamente a do tipo esperado.
+    findmnt -n -t "$BACKUP_REQUIRE_FSTYPE" --mountpoint "$BACKUP_MOUNT" >/dev/null \
+      || fail "$BACKUP_MOUNT não está montado como $BACKUP_REQUIRE_FSTYPE."
+  fi
+  [ -f "$RESTIC_REPOSITORY/config" ] || fail "repositório restic não encontrado em $RESTIC_REPOSITORY."
+  [ -r "$RESTIC_PASSWORD_FILE" ] || fail "arquivo de senha do restic não legível."
+  STAGE="acesso ao repositório"
+  restic_cmd cat config >/dev/null 2>&1 || fail "não foi possível abrir o repositório (senha ou acesso)."
+  log "Destino OK: $BACKUP_MOUNT ($BACKUP_REQUIRE_FSTYPE), repositório acessível."
+}
+
+snapshot_sqlite() { # $1 = nome lógico, $2 = caminho do banco
+  local name=$1 db=$2 dir base dest
+  dir=$(dirname "$db"); base=$(basename "$db")
+  dest="$RUN_DIR/sqlite/$name"
+  mkdir -p "$dest"
+  case "$SNAPSHOT_RUNNER" in
+    docker)
+      docker run --rm --network none --read-only --tmpfs /tmp --cap-drop ALL --cap-add DAC_READ_SEARCH \
+        --security-opt no-new-privileges -e PYTHONDONTWRITEBYTECODE=1 \
+        -v "$dir:/src:ro" -v "$dest:/dst" -v "$LIB_DIR:/app:ro" "$PYTHON_IMAGE" \
+        python /app/sqlite_snapshot.py --source "/src/$base" --dest "/dst/$base"
+      ;;
+    local)
+      python3 "$LIB_DIR/sqlite_snapshot.py" --source "$db" --dest "$dest/$base"
+      ;;
+    *) fail "SNAPSHOT_RUNNER inválido: $SNAPSHOT_RUNNER" ;;
+  esac
+}
+
+write_metadata() {
+  local meta="$RUN_DIR/meta"
+  mkdir -p "$meta"
+  date --iso-8601=seconds > "$meta/backup-created-at.txt"
+  dpkg-query -W -f='${binary:Package}\t${Version}\n' > "$meta/packages.txt" 2>/dev/null || true
+  docker image ls --digests > "$meta/docker-images.txt" 2>/dev/null || true
+  docker compose ls > "$meta/compose-projects.txt" 2>/dev/null || true
+  docker volume ls > "$meta/docker-volumes.txt" 2>/dev/null || true
+  systemctl list-unit-files --no-pager > "$meta/systemd-unit-files.txt" 2>/dev/null || true
+}
+
+run_backup() {
+  STAGE="preparação"
+  install -d -m 700 "$STAGING_PARENT"
+  # Caminho fixo (protegido pelo flock): os bancos ficam sempre em .../current/sqlite/<nome>/ nos snapshots.
+  RUN_DIR="$STAGING_PARENT/current"
+  if [ -e "$RUN_DIR" ]; then
+    log "AVISO: staging de execução anterior interrompida encontrado; removendo."
+    rm -rf --one-file-system -- "$RUN_DIR"
+  fi
+  install -d -m 700 "$RUN_DIR"
+
+  STAGE="snapshots SQLite"
+  local entry name db n=0
+  for entry in "${SQLITE_DATABASES[@]}"; do
+    name=${entry%%|*}; db=${entry#*|}
+    if [ ! -f "$db" ]; then log "AVISO: banco ausente, ignorado: $name"; continue; fi
+    printf '[%s] SQLite %s: ' "$(date --iso-8601=seconds)" "$name"
+    snapshot_sqlite "$name" "$db" || fail "snapshot do banco $name"
+    n=$((n + 1))
+  done
+  log "Snapshots SQLite consistentes: $n"
+
+  STAGE="metadados"
+  write_metadata
+
+  STAGE="lista de caminhos"
+  local paths=() p excludes="$RUN_DIR/excludes.txt"
+  for p in "${BACKUP_PATHS[@]}"; do
+    if [ -e "$p" ]; then paths+=("$p"); else log "AVISO: caminho ausente, ignorado: $p"; fi
+  done
+  paths+=("$RUN_DIR/sqlite" "$RUN_DIR/meta")
+  {
+    printf '%s\n' "${BACKUP_EXCLUDES[@]}"
+    for entry in "${SQLITE_DATABASES[@]}"; do
+      db=${entry#*|}
+      printf '%s\n' "$db" "$db-wal" "$db-shm" "$db-journal"
+    done
+  } > "$excludes"
+
+  STAGE="restic backup"
+  local dry=()
+  [ "$MODE" = dry-run ] && dry=(--dry-run)
+  log "restic backup (${#paths[@]} caminhos)${dry:+ [dry-run]}..."
+  # --json: somente o resumo é registrado (nenhum nome de arquivo vai para o log).
+  restic_cmd backup "${dry[@]}" --json --tag "$BACKUP_TAG" --host "$(hostname)" --exclude-file "$excludes" \
+    --exclude-caches --exclude-if-present .nobackup "${paths[@]}" \
+    | python3 -c '
+import json, sys
+for line in sys.stdin:
+    try:
+        m = json.loads(line)
+    except ValueError:
+        continue
+    if m.get("message_type") == "summary":
+        keys = ("files_new", "files_changed", "files_unmodified", "total_files_processed",
+                "total_bytes_processed", "data_added", "snapshot_id")
+        print("  resumo: " + ", ".join(f"{k}={m.get(k)}" for k in keys if k in m))
+    elif m.get("message_type") == "error":
+        print("  erro do restic em um item (detalhe omitido)", file=sys.stderr)'
+
+  if [ "$MODE" = dry-run ]; then
+    log "Dry-run concluído (nada gravado no repositório)."
+    return
+  fi
+
+  STAGE="retenção"
+  log "Aplicando retenção somente à tag $BACKUP_TAG..."
+  restic_cmd forget --tag "$BACKUP_TAG" --group-by host,tags "${RETENTION[@]}" --prune --quiet
+
+  STAGE="resumo"
+  restic_cmd snapshots --tag "$BACKUP_TAG" --latest 1 --compact | tail -n +3 | head -n 1 | sed 's/^/  último: /'
+  kuma_push up "Backup OK: $n bancos, ${#paths[@]} caminhos"
+}
+
+log "backup-home-server v2 — modo $MODE"
+check_destination
+
+case "$MODE" in
+  check-destination) ;;
+  check)
+    STAGE="restic check"
+    restic_cmd check --read-data-subset="$CHECK_SUBSET"
+    ;;
+  backup|dry-run)
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || fail "já existe um backup em execução."
+    run_backup
+    ;;
+esac
+STAGE="concluído"
+log "Concluído."
