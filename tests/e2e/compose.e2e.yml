@@ -1,0 +1,17 @@
+# Override SOMENTE para o teste local de ponta a ponta (scripts/validate-local.sh e2e).
+# O Docker Desktop não reproduz a rede do host do servidor; aqui o Caddy roda em bridge, publica 18080/18443 no
+# loopback local e alcança o Authelia pelo nome do serviço. Os upstreams das aplicações não existem neste teste.
+services:
+  caddy:
+    container_name: accessgateway-e2e-caddy
+    network_mode: !reset null
+    ports:
+      - "127.0.0.1:18080:18080"
+      - "127.0.0.1:18443:18443"
+    environment:
+      GATEWAY_DEFAULT_BIND: ""
+      GATEWAY_AUTHELIA_UPSTREAM: authelia:9091
+  authelia:
+    container_name: accessgateway-e2e-authelia
+    ports: !override
+      - "127.0.0.1:19091:9091"

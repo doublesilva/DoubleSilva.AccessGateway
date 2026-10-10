@@ -1,0 +1,79 @@
+# AccessGateway — Green (Caddy + Authelia).
+#
+# Os padrões são os do MODO PREPARAÇÃO: um `up` sem arquivo de ambiente nunca ocupa 80/443 nem 9091.
+# Uso no servidor (scripts/deploy-green.sh):
+#   docker compose --env-file /srv/accessgateway/accessgateway.env -f compose.yml up -d
+#
+# Montagens com create_host_path=false: um diretório ausente faz o `up` falhar em vez de criar um diretório vazio.
+# Nenhum caminho da Blue é montado com escrita; a única montagem de caminho da Blue é casa-dashboard, somente leitura.
+
+name: accessgateway
+
+x-bind: &bind
+  type: bind
+  bind:
+    create_host_path: false
+
+services:
+  caddy:
+    image: caddy@sha256:14a9c00d4e833ebc2b65d36515b37bde3b73f0b323a2663aaafc88953d8c4e3f # 2.11.4, a mesma da Blue
+    container_name: accessgateway-caddy
+    network_mode: host
+    restart: unless-stopped
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    environment:
+      GATEWAY_ADMIN_PORT: ${GATEWAY_ADMIN_PORT:-2020}
+      GATEWAY_HTTP_PORT: ${GATEWAY_HTTP_PORT:-18080}
+      GATEWAY_HTTPS_PORT: ${GATEWAY_HTTPS_PORT:-18443}
+      # Vazio somente no cutover (todas as interfaces); sem variável definida, fica restrito ao loopback.
+      GATEWAY_DEFAULT_BIND: ${GATEWAY_DEFAULT_BIND-default_bind 127.0.0.1}
+      GATEWAY_AUTHELIA_UPSTREAM: 127.0.0.1:${AUTHELIA_HOST_PORT:-19091}
+    volumes:
+      - <<: *bind
+        source: ./caddy
+        target: /etc/caddy
+        read_only: true
+      - <<: *bind
+        source: ${GATEWAY_ROOT:-/srv/accessgateway}/data/caddy
+        target: /data
+      - <<: *bind
+        source: ${GATEWAY_ROOT:-/srv/accessgateway}/data/caddy-config
+        target: /config
+      - <<: *bind
+        source: ${GATEWAY_ROOT:-/srv/accessgateway}/static/netdata-dashboard
+        target: /config/netdata-dashboard
+        read_only: true
+      # Publicado pelo deploy do HomeAutomation; a Green só lê (sem alterar aquele projeto).
+      - <<: *bind
+        source: ${CASA_DASHBOARD_DIR:-/opt/caddy/config/casa-dashboard}
+        target: /config/casa-dashboard
+        read_only: true
+    depends_on:
+      authelia:
+        condition: service_healthy
+
+  authelia:
+    image: authelia/authelia@sha256:bd97cff4fcbf715b5ff1f9ae286afbe6033afce385302520b0368122d43a6f54 # 4.39.28, a mesma da Blue
+    container_name: accessgateway-authelia
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${AUTHELIA_HOST_PORT:-19091}:9091"
+    environment:
+      TZ: America/Sao_Paulo
+      X_AUTHELIA_CONFIG: /config/configuration.yml
+      X_AUTHELIA_CONFIG_FILTERS: template
+      AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE: /secrets/JWT_SECRET
+      AUTHELIA_SESSION_SECRET_FILE: /secrets/SESSION_SECRET
+      AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE: /secrets/STORAGE_ENCRYPTION_KEY
+    volumes:
+      - <<: *bind
+        source: ./authelia/configuration.yml
+        target: /config/configuration.yml
+        read_only: true
+      - <<: *bind
+        source: ${GATEWAY_ROOT:-/srv/accessgateway}/secrets/authelia
+        target: /secrets
+        read_only: true
+      - <<: *bind
+        source: ${GATEWAY_ROOT:-/srv/accessgateway}/data/authelia
+        target: /data

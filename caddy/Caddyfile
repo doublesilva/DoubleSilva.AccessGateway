@@ -1,0 +1,15 @@
+# AccessGateway — Caddy (Green).
+#
+# As rotas reproduzem 1:1 o Caddyfile da Blue (tests/baseline/blue.Caddyfile). Portas, bind, admin e o upstream do
+# Authelia vêm do ambiente (compose.yml), substituídos antes do parse:
+#   preparação: GATEWAY_DEFAULT_BIND="default_bind 127.0.0.1", portas 18080/18443, admin 2020
+#   produção:   GATEWAY_DEFAULT_BIND="" (todas as interfaces), portas 80/443 — somente no cutover (T04)
+{
+	admin localhost:{$GATEWAY_ADMIN_PORT}
+	http_port {$GATEWAY_HTTP_PORT}
+	https_port {$GATEWAY_HTTPS_PORT}
+	{$GATEWAY_DEFAULT_BIND}
+}
+
+import snippets/*.caddy
+import sites/*.caddy

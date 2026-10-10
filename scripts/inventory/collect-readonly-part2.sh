@@ -169,7 +169,8 @@ s_dns() {
 }
 
 ALL="authelia ca network ports firewall tailscale deploy schedule dns"
-for s in ${*:-$ALL}; do
+if [ $# -eq 0 ]; then read -r -a SECTIONS <<<"$ALL"; else SECTIONS=("$@"); fi
+for s in "${SECTIONS[@]}"; do
   case " $ALL " in
     *" $s "*) "s_$s" ;;
     *) echo "seção desconhecida: $s (válidas: $ALL)" >&2 ;;

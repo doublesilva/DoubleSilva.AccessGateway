@@ -1,6 +1,6 @@
 # T02 — Proposta: estrutura do repositório e configuração da Green
 
-**Situação:** proposta. A execução depende de autorização. A T02 **não toca no servidor**: tudo é construído e validado
+**Situação:** executada em 2026-10-10 (ver [T02-relatorio.md](T02-relatorio.md), incluindo os desvios desta proposta). A T02 **não toca no servidor**: tudo é construído e validado
 neste repositório e em containers locais e descartáveis, com segredos fictícios.
 
 ## 1. Objetivo

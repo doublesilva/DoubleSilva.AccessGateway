@@ -1,0 +1,75 @@
+# Hosts locais *.home (reescritas explícitas no AdGuard → 192.168.0.162).
+# Mesma ordem da Blue, para que o JSON adaptado seja idêntico.
+# Paridade com a Blue: estes aliases não passam pelo Authelia (achado de segurança registrado no inventário).
+
+kuma.home {
+	tls internal
+
+	reverse_proxy 127.0.0.1:3001
+}
+
+frigate.home {
+	tls internal
+
+	reverse_proxy https://127.0.0.1:8971 {
+		import insecure_https_upstream
+	}
+}
+
+panel.home {
+	tls internal
+
+	redir https://panel.home.doublesilva.com{uri} permanent
+}
+
+adguard.home {
+	tls internal
+
+	redir https://adguard.home.doublesilva.com{uri} permanent
+}
+
+portainer.home {
+	tls internal
+
+	redir https://portainer.home.doublesilva.com{uri} permanent
+}
+
+ha.home {
+	tls internal
+
+	reverse_proxy 192.168.0.166:80
+}
+
+mediamtx.home {
+	tls internal
+
+	reverse_proxy 127.0.0.1:8889
+}
+
+netdata.home {
+	tls internal
+
+	import netdata_dashboard
+}
+
+casa.home {
+	tls internal
+
+	reverse_proxy 127.0.0.1:5300
+}
+
+# Distribuição da raiz da CA interna (somente HTTP). O arquivo vem de /config/casa-dashboard, publicado pelo
+# deploy do HomeAutomation (montado somente leitura na Green).
+http://cert.home {
+	@rootCert path /caddy-root.crt
+
+	handle @rootCert {
+		root * /config/casa-dashboard
+		header Content-Type application/x-x509-ca-cert
+		file_server
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

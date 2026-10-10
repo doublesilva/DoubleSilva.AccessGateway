@@ -1,0 +1,34 @@
+# Autenticação via Authelia, idêntica à da Blue; somente o upstream muda (Green: 127.0.0.1:19091).
+(authelia) {
+	forward_auth {$GATEWAY_AUTHELIA_UPSTREAM} {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+}
+
+# Upstream HTTPS local com certificado próprio (Frigate, Portainer).
+(insecure_https_upstream) {
+	transport http {
+		tls_insecure_skip_verify
+	}
+}
+
+# Netdata: API e dashboard legado no upstream; o restante é a página estática.
+(netdata_dashboard) {
+	handle /api/* {
+		reverse_proxy 127.0.0.1:19999
+	}
+
+	handle /v1 {
+		reverse_proxy 127.0.0.1:19999
+	}
+
+	handle /v1/* {
+		reverse_proxy 127.0.0.1:19999
+	}
+
+	handle {
+		root * /config/netdata-dashboard
+		file_server
+	}
+}

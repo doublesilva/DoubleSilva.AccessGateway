@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Saídas temporárias de scripts/validate-local.sh (segredos fictícios, ignorados pelo Git e apagados ao final)"
+paths = ['''(^|/)\.tmp/''']

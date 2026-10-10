@@ -1,0 +1,96 @@
+# Hosts *.home.doublesilva.com (DNS: curinga no AdGuard → 192.168.0.162).
+
+auth.home.doublesilva.com {
+	tls internal
+
+	reverse_proxy {$GATEWAY_AUTHELIA_UPSTREAM}
+}
+
+panel.home.doublesilva.com {
+	tls internal
+
+	# Streaming WHEP: deixa a autenticação a cargo do próprio Panel.
+	# Não usar handle_path, pois o ASP.NET precisa receber /stream/...
+	handle /stream/* {
+		reverse_proxy 127.0.0.1:5200
+	}
+
+	handle {
+		import authelia
+
+		reverse_proxy 127.0.0.1:5200
+	}
+}
+
+kuma.home.doublesilva.com {
+	tls internal
+
+	import authelia
+
+	reverse_proxy 127.0.0.1:3001
+}
+
+netdata.home.doublesilva.com {
+	tls internal
+
+	import authelia
+
+	reverse_proxy 127.0.0.1:19999
+}
+
+admin.home.doublesilva.com {
+	tls internal
+
+	import authelia
+
+	# Central administrativa (página estática) + API do Netdata
+	import netdata_dashboard
+}
+
+adguard.home.doublesilva.com {
+	tls internal
+
+	import authelia
+
+	reverse_proxy 127.0.0.1:3000
+}
+
+portainer.home.doublesilva.com {
+	tls internal
+
+	import authelia
+
+	reverse_proxy https://127.0.0.1:9443 {
+		import insecure_https_upstream
+	}
+}
+
+frigate.home.doublesilva.com {
+	tls internal
+
+	import authelia
+
+	reverse_proxy https://127.0.0.1:8971 {
+		import insecure_https_upstream
+	}
+}
+
+ha.home.doublesilva.com {
+	tls internal
+
+	reverse_proxy 192.168.0.166:80
+}
+
+mediamtx.home.doublesilva.com {
+	tls internal
+
+	reverse_proxy 127.0.0.1:8889
+}
+
+jarvis.home.doublesilva.com {
+	tls internal
+
+	import authelia
+
+	reverse_proxy 127.0.0.1:5500
+}

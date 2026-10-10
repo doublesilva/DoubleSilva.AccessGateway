@@ -1,0 +1,33 @@
+# Rotas comparadas entre Blue e Green (parity-check.sh) e base dos testes de validate-green.sh.
+# esquema	host	caminho	classe
+# Classes: fa = protegido por forward_auth (302 para o portal sem sessão); open = sem autenticação no proxy;
+#          redirect = 301 para *.home.doublesilva.com; auth = Authelia; http = porta HTTP.
+https	auth.home.doublesilva.com	/	auth
+https	auth.home.doublesilva.com	/api/health	auth
+https	auth.home.doublesilva.com	/.well-known/openid-configuration	auth
+https	auth.home.doublesilva.com	/jwks.json	auth
+https	panel.home.doublesilva.com	/	fa
+https	panel.home.doublesilva.com	/stream/parity-check	open
+https	kuma.home.doublesilva.com	/	fa
+https	netdata.home.doublesilva.com	/	fa
+https	admin.home.doublesilva.com	/	fa
+https	admin.home.doublesilva.com	/api/v1/info	fa
+https	adguard.home.doublesilva.com	/	fa
+https	portainer.home.doublesilva.com	/	fa
+https	frigate.home.doublesilva.com	/	fa
+https	jarvis.home.doublesilva.com	/	fa
+https	ha.home.doublesilva.com	/	open
+https	mediamtx.home.doublesilva.com	/	open
+https	casa.home	/	open
+https	kuma.home	/	open
+https	frigate.home	/	open
+https	ha.home	/	open
+https	mediamtx.home	/	open
+https	netdata.home	/	open
+https	netdata.home	/api/v1/info	open
+https	panel.home	/teste?x=1	redirect
+https	adguard.home	/	redirect
+https	portainer.home	/	redirect
+http	cert.home	/caddy-root.crt	http
+http	cert.home	/outro	http
+http	auth.home.doublesilva.com	/	http

@@ -1,0 +1,207 @@
+theme: auto
+
+server:
+  address: 'tcp://0.0.0.0:9091/'
+
+log:
+  level: info
+
+authentication_backend:
+  password_reset:
+    disable: true
+
+  file:
+    path: '/config/users_database.yml'
+    watch: true
+
+    password:
+      algorithm: argon2
+
+access_control:
+  default_policy: deny
+
+  rules:
+    - domain:
+        - 'admin.home.doublesilva.com'
+        - 'kuma.home.doublesilva.com'
+        - 'netdata.home.doublesilva.com'
+        - 'adguard.home.doublesilva.com'
+        - 'portainer.home.doublesilva.com'
+        - 'jarvis.home.doublesilva.com'
+      subject:
+        - 'group:home-admin'
+      policy: one_factor
+
+    - domain:
+        - 'panel.home.doublesilva.com'
+        - 'frigate.home.doublesilva.com'
+      subject:
+        - 'group:home-admin'
+        - 'group:home-user'
+      policy: one_factor
+
+session:
+  name: authelia_session
+
+  cookies:
+    - domain: 'home.doublesilva.com'
+      authelia_url: 'https://auth.home.doublesilva.com'
+      default_redirection_url: 'https://admin.home.doublesilva.com'
+
+storage:
+  local:
+    path: '/config/db.sqlite3'
+
+notifier:
+  filesystem:
+    filename: '/config/notification.txt'
+
+identity_providers:
+  oidc:
+    hmac_secret: '{{ secret "/secrets/oidc/hmac_secret" }}'
+
+    jwks:
+      - algorithm: 'RS256'
+        use: 'sig'
+        key: {{ secret "/secrets/oidc/jwks-rsa.key" | mindent 10 "|" | msquote }}
+
+    claims_policies:
+      homeautomation:
+        access_token:
+          - 'groups'
+
+    clients:
+      - client_id: 'homeautomation-panel'
+        client_name: 'Home Automation Panel'
+
+        # Coloque aqui o Digest: gerado pelo comando
+        # authelia crypto hash generate pbkdf2
+        client_secret: <REDACTED>
+
+        public: false
+
+        authorization_policy: 'one_factor'
+
+        redirect_uris:
+          - 'https://panel.home.doublesilva.com/signin-oidc'
+
+        scopes:
+          - 'openid'
+          - 'profile'
+          - 'email'
+          - 'groups'
+
+        grant_types:
+          - 'authorization_code'
+
+        response_types:
+          - 'code'
+
+        response_modes:
+          - 'form_post'
+          - 'query'
+
+        token_endpoint_auth_method: 'client_secret_post'
+        pushed_authorization_request_endpoint_auth_method: 'client_secret_post'
+
+        require_pkce: true
+        pkce_challenge_method: 'S256'
+
+        claims_policy: 'homeautomation'
+
+        audience:
+          - 'homeautomation-api'
+
+        requested_audience_mode: 'implicit'
+
+        access_token_signed_response_alg: 'RS256'
+
+        id_token_signed_response_alg: 'RS256'
+
+        consent_mode: 'pre-configured'
+        pre_configured_consent_duration: '1 year'
+
+      - client_id: 'homeautomation-outhome'
+        client_name: 'Home Automation OutHome'
+        client_secret: <REDACTED>
+
+        public: false
+        authorization_policy: 'one_factor'
+
+        redirect_uris:
+          - 'https://casa.home/signin-oidc'
+
+        scopes:
+          - 'openid'
+          - 'profile'
+          - 'email'
+          - 'groups'
+
+        grant_types:
+          - 'authorization_code'
+
+        response_types:
+          - 'code'
+
+        response_modes:
+          - 'form_post'
+          - 'query'
+
+        token_endpoint_auth_method: 'client_secret_post'
+        pushed_authorization_request_endpoint_auth_method: 'client_secret_post'
+
+        require_pkce: true
+        pkce_challenge_method: 'S256'
+
+        claims_policy: 'homeautomation'
+
+        audience:
+          - 'homeautomation-api'
+
+        requested_audience_mode: 'implicit'
+
+        access_token_signed_response_alg: 'RS256'
+        id_token_signed_response_alg: 'RS256'
+
+        consent_mode: 'pre-configured'
+        pre_configured_consent_duration: '1 year'
+      - client_id: 'jarvis-home'
+        client_name: 'Jarvis Home'
+        client_secret: <REDACTED>
+        public: false
+        scopes:
+          - 'homeautomation.mcp.read'
+        audience:
+          - 'homeautomation-api'
+        grant_types:
+          - 'client_credentials'
+        requested_audience_mode: 'explicit'
+        access_token_signed_response_alg: 'RS256'
+        token_endpoint_auth_method: 'client_secret_basic'
+
+      - client_id: 'saldo360'
+        client_name: 'Saldo360'
+        # Digest do segredo exclusivo (texto puro só na API). Gerado por scripts/new-oidc-client-secret.ps1.
+        client_secret: <REDACTED>
+        public: false
+        authorization_policy: 'one_factor'
+        consent_mode: 'implicit'
+        require_pkce: true
+        pkce_challenge_method: 'S256'
+        # Somente desenvolvimento por enquanto; callback de produção pendente.
+        redirect_uris:
+          - 'http://localhost:5173/signin-oidc'
+        scopes:
+          - 'openid'
+          - 'profile'
+          - 'email'
+        grant_types:
+          - 'authorization_code'
+        response_types:
+          - 'code'
+        response_modes:
+          - 'query'
+        token_endpoint_auth_method: 'client_secret_post'
+        pushed_authorization_request_endpoint_auth_method: 'client_secret_post'
+        userinfo_signed_response_alg: 'none'
+

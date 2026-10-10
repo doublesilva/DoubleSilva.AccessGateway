@@ -202,29 +202,23 @@ Passos (indisponibilidade esperada: menos de 10 s):
 
 1. **Destino isolado:** `/srv/accessgateway/data/authelia/` (`root:root 700`). A Green monta apenas esse diretório;
    o diretório da Blue nunca é montado na Green.
-2. **Cópia consistente e somente leitura**, pela API de backup online do SQLite com a origem aberta em modo `ro`.
-   O `sqlite3` **não está instalado no host** (coleta de 2026-10-10) e não será instalado. A cópia roda num container
-   efêmero, com imagem fixada por digest e definida na T02:
-
-   ```sh
-   docker run --rm --network none \
-     -v /home/diego/containers/authelia/config:/src:ro \
-     -v /srv/accessgateway/data/authelia:/dst \
-     <imagem-sqlite@sha256:...> \
-     sqlite3 'file:/src/db.sqlite3?mode=ro' ".backup '/dst/db.sqlite3'"
-   ```
-
+2. **Cópia consistente e somente leitura**, implementada na T02 em Python
+   ([`scripts/snapshot-authelia-db.sh`](../scripts/snapshot-authelia-db.sh) +
+   [`authelia_snapshot.py`](../scripts/snapshot/authelia_snapshot.py)). O `sqlite3` não está instalado no host e não
+   será instalado; a cópia roda num container Python descartável (imagem fixada por digest), `--network none`, rootfs
+   somente leitura, sem capabilities, com a origem montada `:ro` e aberta com `mode=ro`.
    - O diretório inteiro é montado (não só o arquivo) para que um eventual `db.sqlite3-journal` fique visível ao SQLite.
-   - A montagem `:ro` e o `mode=ro` garantem duas vezes que nada é escrito na origem.
-   - A API de backup usa só um lock compartilhado de leitura, coordenado pelo kernel com o Authelia Blue, e reinicia a
-     cópia se a origem mudar no meio. Se houver um journal pendente, a operação falha em vez de modificar a Blue; nesse
-     caso, basta repetir.
+   - Dentro de **uma única transação de leitura** na origem: contagem por tabela, cópia pela API de backup online e
+     nova contagem. As duas contagens precisam ser iguais, e a cópia precisa ter as mesmas contagens. O lock
+     compartilhado é coordenado pelo kernel com o Authelia Blue.
    - Sem rede e sem acesso a segredos: o arquivo é copiado ainda criptografado.
+   - Comprovado na T02: 30 snapshots sob ~61 mil transações concorrentes (local) e prova em produção com destino em
+     tmpfs (`integrity_check: ok`, journal `delete`, schema 29). Ver [T02-relatorio.md](T02-relatorio.md).
 3. **Validação da cópia**, sem imprimir conteúdo:
-   - `PRAGMA integrity_check` (esperado: `ok`);
-   - `PRAGMA journal_mode`;
-   - `sha256sum`;
-   - contagem de linhas por tabela.
+   - `PRAGMA integrity_check` (esperado: `ok`) e `PRAGMA foreign_key_check` (vazio);
+   - contagens por tabela iguais às da origem no instante do snapshot;
+   - mesma versão de schema (tabela `migrations`);
+   - `sha256` e manifesto JSON gravados ao lado do snapshot.
 4. **Validação com o Authelia, offline:** container efêmero da imagem Green, `--network none`, apontando para a cópia:
    - `authelia storage schema-info`: versão do schema igual à da Blue;
    - `authelia storage encryption check`: confirma que a chave abre o banco.
