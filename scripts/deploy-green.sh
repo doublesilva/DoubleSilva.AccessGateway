@@ -5,14 +5,22 @@
 # banco e PKI provisionados; fingerprint da CA; portas 18080/18443/19091/2020 livres (ou já da própria Green).
 # A Blue é verificada antes e depois e nunca é tocada.
 #
-# Uso (root): deploy-green.sh [--no-validate]
+# Uso (root):
+#   deploy-green.sh --check-only    pré-condições + docker compose config + regras de montagem/portas; NÃO sobe nada (T03.1)
+#   deploy-green.sh [--no-validate] sobe a Green em modo preparação (T03.2)
 set -Eeuo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/common.sh
 . "$HERE/lib/common.sh"
 
 VALIDATE=1
-[ "${1:-}" = --no-validate ] && VALIDATE=0
+CHECK_ONLY=0
+case "${1:-}" in
+  --no-validate) VALIDATE=0 ;;
+  --check-only) CHECK_ONLY=1 ;;
+  "") ;;
+  *) die "opção inválida: $1" ;;
+esac
 
 require_root
 load_env
@@ -45,6 +53,23 @@ blue_status || warn "a Blue não está no estado da baseline (seguindo: a Green 
 
 log "== Compose =="
 compose_green config -q
+log "docker compose config: válido"
+rendered=$(mktemp)
+compose_green config --format json > "$rendered"
+python3 "$HERE/../tests/tools/compose_check.py" "$rendered" || { rm -f "$rendered"; die "compose fora das regras de preparação"; }
+rm -f "$rendered"
+for d in data/caddy data/caddy-config data/authelia secrets/authelia static/netdata-dashboard; do
+  [ -d "$GATEWAY_ROOT/$d" ] || die "diretório de montagem ausente: $GATEWAY_ROOT/$d"
+done
+log "todas as origens de montagem existem (create_host_path=false)"
+
+if [ "$CHECK_ONLY" -eq 1 ]; then
+  [ -z "$(docker ps -aq --filter name=accessgateway)" ] && log "nenhum container da Green criado" || warn "existem containers da Green"
+  blue_status || warn "verifique a Blue."
+  log "CHECK-ONLY concluído: nada foi iniciado."
+  exit 0
+fi
+
 compose_green up -d --wait --wait-timeout 120
 compose_green ps
 

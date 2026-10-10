@@ -10,7 +10,9 @@
 
 - Fora da janela do timer (12:30) e com o notebook de destino ligado.
 - Senha do restic com cópia fora do servidor.
-- Monitor push do Kuma para o backup existente (o mesmo de `/root/.uptime-kuma-backup-push.conf`).
+- Monitor push do Kuma para o backup existente (o mesmo de `/root/.uptime-kuma-backup-push.conf`). A URL deve usar
+  `http://127.0.0.1:3001/...`: o Kuma só escuta no loopback. Teste com
+  `sudo curl --config /root/.uptime-kuma-backup-push.conf -fsS -o /dev/null -w '%{http_code}\n'`, que deve retornar 200.
 - Arquivos de `infra/home-server-backup/` copiados para `/tmp/hsb` no servidor (sem sudo), com fim de linha LF.
   A partir do Windows: `scp backup-home-server backup.conf sqlite_snapshot.py home-server:/tmp/hsb/` e
   `scp systemd/home-server-backup.service.d/10-retentativas.conf home-server:/tmp/hsb/systemd/home-server-backup.service.d/`.

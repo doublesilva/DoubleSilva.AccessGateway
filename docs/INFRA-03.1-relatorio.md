@@ -115,6 +115,26 @@ O primeiro `--dry-run` em produção (2026-10-10 19:47) parou no `frigate.db` co
 
 O dry-run interrompido terminou corretamente: staging removido, nenhum container parado, nada gravado no repositório.
 
+### 4.6 Primeiro backup real (2026-10-10 19:58, acompanhado)
+
+| Verificação | Resultado |
+| --- | --- |
+| Snapshot | `557f8032` (`home-server-v2`), 24 caminhos, 671 arquivos, ~49 MB; 7 bancos SQLite com `integrity_check` ok |
+| Snapshots antigos | `9c9ddd9c` e `4460afe6` (2026-09-12, `home-server`) preservados |
+| `restic check --read-data-subset=100%` | `no errors were found` (3 snapshots, 7 packs) |
+| Duração | 22 s (19:58:37 → 19:58:59); staging removido; unit `Result=success` |
+| DNS durante o backup | 295 consultas a `casa.home` em 10 min, **0 falhas** |
+| Serviços | AdGuard, Kuma e Portainer sem reinício (`StartedAt` inalterado) |
+
+Ajustes feitos depois da primeira execução:
+
+- **Cache do restic:** sob o systemd não há `$HOME`, e o restic rodava sem cache. Agora usa `RESTIC_CACHE_DIR=/var/cache/home-server-backup/restic`.
+- **Diagnóstico do Kuma:** o aviso registra o código do curl e o status HTTP, sem a URL.
+- **URL do push:** apontava para `192.168.0.162:3001`, mas o Kuma só escuta em `127.0.0.1:3001` (conexão recusada).
+  O arquivo `/root/.uptime-kuma-backup-push.conf` foi corrigido para `127.0.0.1`, e o teste de push retornou 200.
+  O script v1 tinha o mesmo defeito, encoberto porque falhava antes.
+- **Pendente:** o token do push foi exposto durante o diagnóstico. Recomenda-se gerar um novo no Kuma.
+
 ## 5. Riscos e observações
 
 | Risco | Tratamento |
