@@ -21,31 +21,33 @@ Durante toda a T03:
 | Release versionada | commit ou tag da release a publicar (ex.: `t03`) |
 
 Os comandos com `sudo` são executados por você, em sessão interativa (`ssh -t home-server`), porque pedem senha.
+O diretório `/srv/accessgateway` é `root:root 750` (contém segredos): o usuário `diego` não entra nele, por isso os
+scripts são chamados por caminho absoluto com `sudo`.
 
 ## 1. Publicar a release em `/srv/accessgateway/app`
 
 Na estação de trabalho:
 
 ```sh
-git archive --format=tar.gz -o accessgateway-t03.tar.gz t03
-scp accessgateway-t03.tar.gz home-server:/tmp/
+git archive --format=tar.gz -o accessgateway-release.tar.gz HEAD     # ou uma tag
+scp accessgateway-release.tar.gz home-server:/tmp/
 ```
 
-No servidor:
+No servidor (confira o `sha256sum` com o gerado na estação):
 
 ```sh
 sudo install -d -m 750 -o root -g root /srv/accessgateway
 sudo install -d -m 755 -o root -g root /srv/accessgateway/app
-sudo tar -xzf /tmp/accessgateway-t03.tar.gz -C /srv/accessgateway/app --no-same-owner
-sudo chown -R root:root /srv/accessgateway/app && rm /tmp/accessgateway-t03.tar.gz
+sudo tar -xzf /tmp/accessgateway-release.tar.gz -C /srv/accessgateway/app --no-same-owner
+sudo chown -R root:root /srv/accessgateway/app && sudo chmod -R go-w /srv/accessgateway/app
+rm /tmp/accessgateway-release.tar.gz
 ```
 
 ## 2. Provisionar (cópia local Blue → Green)
 
 ```sh
-cd /srv/accessgateway/app
-sudo scripts/provision-green.sh            # simulação
-sudo scripts/provision-green.sh --apply
+sudo /srv/accessgateway/app/scripts/provision-green.sh            # simulação
+sudo /srv/accessgateway/app/scripts/provision-green.sh --apply
 ```
 
 Critérios:
@@ -57,8 +59,8 @@ Critérios:
 ## 3. Snapshot do banco do Authelia
 
 ```sh
-sudo scripts/snapshot-authelia-db.sh --check-only   # prova de consistência em tmpfs; não grava nada
-sudo scripts/snapshot-authelia-db.sh --install      # grava em snapshots/ e instala em data/authelia/db.sqlite3
+sudo /srv/accessgateway/app/scripts/snapshot-authelia-db.sh --check-only   # prova de consistência em tmpfs; não grava nada
+sudo /srv/accessgateway/app/scripts/snapshot-authelia-db.sh --install      # grava em snapshots/ e instala em data/authelia/db.sqlite3
 ```
 
 Critérios no manifesto impresso:
@@ -68,12 +70,16 @@ Critérios no manifesto impresso:
 - `source_journal_mode: delete`;
 - `schema_version` igual ao da prova de 2026-10-10 (29), salvo atualização posterior do Authelia Blue.
 
-## 4. Ambiente e deploy
+## 4. Ambiente, validação sem iniciar (T03.1) e deploy (T03.2)
 
 ```sh
-sudo install -m 600 -o root -g root env/prep.env.example /srv/accessgateway/accessgateway.env
-sudo scripts/deploy-green.sh
+sudo install -m 600 -o root -g root /srv/accessgateway/app/env/prep.env.example /srv/accessgateway/accessgateway.env
+sudo /srv/accessgateway/app/scripts/deploy-green.sh --check-only    # T03.1: pré-condições + compose config + regras; nada é iniciado
+sudo /srv/accessgateway/app/scripts/deploy-green.sh                 # T03.2: sobe a Green (somente com autorização)
 ```
+
+**Rollback da T03.1** (nenhum container foi criado): `sudo rm -rf /srv/accessgateway`. O diretório contém cópias de
+segredos e da PKI. A Blue não é afetada.
 
 O `deploy-green.sh` recusa qualquer configuração com portas de produção. Ele confere novamente segredos, banco, PKI
 e portas livres, sobe com `docker compose up -d --wait`, aguarda o Authelia via Caddy, mostra o estado da Blue antes
@@ -82,9 +88,9 @@ e depois e executa o `validate-green.sh`.
 ## 5. Testes
 
 ```sh
-scripts/validate-green.sh             # 33 verificações (TLS, classes de rota, OIDC, JWKS, cadeia)
-scripts/parity-check.sh               # Blue x Green em cada rota de tests/routes.tsv
-sudo scripts/token-interop-check.sh   # token da Green aceito pela API; controle negativo 401
+sudo /srv/accessgateway/app/scripts/validate-green.sh             # 33 verificações (TLS, classes de rota, OIDC, JWKS, cadeia)
+sudo /srv/accessgateway/app/scripts/parity-check.sh               # Blue x Green em cada rota de tests/routes.tsv
+sudo /srv/accessgateway/app/scripts/token-interop-check.sh   # token da Green aceito pela API; controle negativo 401
 ```
 
 Teste no navegador (opcional, recomendado):
@@ -110,7 +116,7 @@ Gatilhos para abortar: qualquer impacto na Blue, `deploy-green.sh` falhando nas 
 explicadas nos testes.
 
 ```sh
-sudo scripts/rollback.sh --prep     # para e remove os containers da Green; dados ficam em /srv/accessgateway
+sudo /srv/accessgateway/app/scripts/rollback.sh --prep     # para e remove os containers da Green; dados ficam em /srv/accessgateway
 ```
 
 Para descartar também os dados da Green: `sudo rm -rf /srv/accessgateway`. A pasta contém cópias de segredos;
