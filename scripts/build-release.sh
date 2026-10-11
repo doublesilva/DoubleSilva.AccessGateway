@@ -22,7 +22,16 @@ DATE=$(git show -s --format=%cI "$COMMIT")
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/app" "$OUT"
-git archive --format=tar "$COMMIT" | tar -xf - -C "$WORK/app"
+# Sem conversão de fim de linha: com core.autocrlf=true (Windows) o git archive gravaria CRLF e os scripts
+# deixariam de executar no servidor ("bash\r"). O repositório guarda LF; a release sai exatamente como no commit.
+git -c core.autocrlf=false -c core.eol=lf archive --format=tar "$COMMIT" | tar -xf - -C "$WORK/app"
+# Contagem de bytes CR com tr (o grep do Git Bash não é confiável para \r no Windows).
+crlf=$(cd "$WORK/app" && find . -type f -print0 | while IFS= read -r -d '' f; do
+  [ "$(tr -cd '\r' < "$f" | wc -c)" -eq 0 ] || echo "${f#./}"
+done)
+if [ -n "$crlf" ]; then
+  echo "ERRO: arquivos com CRLF na release:" >&2; echo "$crlf" >&2; exit 1
+fi
 
 # shellcheck source=lib/images.sh
 . scripts/lib/images.sh
