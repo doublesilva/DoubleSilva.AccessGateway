@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Stub do docker para tests/caddy-recreate. Estado em $CR:
+#   mounts (montagens atuais do accessgateway-caddy), started (StartedAt), calls.log
+#   fail_up (compose up falha), bad_new (com public-certs o gateway não responde), invalid (caddy validate falha)
+S=${CR:?}
+echo "docker $*" >> "$S/calls.log"
+app_mounts() { # montagens que o compose.yml instalado produziria
+  if grep -q 'shared/public-certs' "$GATEWAY_ROOT/app/compose.yml"; then
+    echo "$GATEWAY_ROOT/shared/public-certs -> /config/public-certs rw=false"
+  else
+    echo "/opt/caddy/config/casa-dashboard -> /config/casa-dashboard rw=false"
+  fi
+  echo "$GATEWAY_ROOT/app/caddy -> /etc/caddy rw=false"
+}
+case "$1" in
+  inspect)
+    case "$*" in
+      *Mounts*) cat "$S/mounts" ;;
+      *StartedAt*) cat "$S/started" ;;
+      *State.Running*) [ "${*: -1}" = caddy ] && echo false || echo true ;;
+      *Config.Env*) echo "GATEWAY_HTTPS_PORT=443" ;;
+      *Config.Image*) echo "caddy@sha256:teste" ;;
+      *) echo '[{"Name": "accessgateway-caddy"}]' ;;
+    esac ;;
+  run) [ ! -e "$S/invalid" ] || exit 1; echo "Valid configuration" ;;
+  compose)
+    case "$*" in
+      *" config -q"*) exit 0 ;;
+      *" config --format json"*)
+        if grep -q 'shared/public-certs' "$GATEWAY_ROOT/app/compose.yml"; then
+          printf '{"services":{"caddy":{"volumes":[{"source":"%s/shared/public-certs","target": "/config/public-certs","read_only":true}]}}}' "$GATEWAY_ROOT"
+        else
+          printf '{"services":{"caddy":{"volumes":[{"source":"/opt/caddy/config/casa-dashboard","target": "/config/casa-dashboard","read_only":true}]}}}'
+        fi ;;
+      *" up -d --no-deps --force-recreate caddy")
+        [ ! -e "$S/fail_up" ] || { echo "Error response from daemon" >&2; exit 1; }
+        app_mounts > "$S/mounts"; date -u +%Y-%m-%dT%H:%M:%S.%NZ > "$S/started" ;;
+      *) echo "stub compose: não suportado: $*" >&2; exit 2 ;;
+    esac ;;
+  *) echo "stub docker: não suportado: $*" >&2; exit 2 ;;
+esac

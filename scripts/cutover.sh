@@ -144,7 +144,7 @@ check "fora da janela do backup (próximo disparo a mais de 60 min)" outside_bac
 check "release instalada confere com RELEASE.sha256" release_ok
 check "usuários de teste ausentes da Green (users_database.yml e senhas)" no_test_users
 check "segredos (600), digests dos clients e CA da Green (fingerprint + par de chaves)" secrets_ok
-check "diretório casa-dashboard presente" test -d /opt/caddy/config/casa-dashboard
+check "raiz pública da CA publicada (shared/public-certs, T07.4)" test -s "$GATEWAY_ROOT/shared/public-certs/caddy-root.crt"
 check "raiz pública da CA legível" test -r "$CA_PUBLIC"
 check "arquivo de ambiente de produção disponível (env/cutover.env.example)" test -f "$GATEWAY_APP_DIR/env/cutover.env.example"
 in_multiplexer() { # pela árvore de processos (funciona com sudo, que remove TMUX/STY; variáveis não bastam)

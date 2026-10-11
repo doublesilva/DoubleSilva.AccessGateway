@@ -44,7 +44,7 @@ done
 PKI="$GATEWAY_ROOT/data/caddy/caddy/pki/authorities/local"
 [ "$(cert_fp "$PKI/root.crt")" = "$EXPECTED_ROOT_FP" ] || die "a raiz da CA da Green não é a da Blue"
 key_matches_cert "$PKI/root.crt" "$PKI/root.key" || die "root.key não corresponde a root.crt"
-[ -d "${CASA_DASHBOARD_DIR:?}" ] || die "CASA_DASHBOARD_DIR ausente: $CASA_DASHBOARD_DIR"
+[ -s "$GATEWAY_ROOT/shared/public-certs/caddy-root.crt" ] || die "raiz pública ausente (rode publish-public-ca.sh --apply)"
 [ -s "$GATEWAY_ROOT/static/netdata-dashboard/index.html" ] || die "static/netdata-dashboard/index.html ausente"
 log "segredos, usuários, banco, PKI (fingerprint OK) e estáticos presentes"
 

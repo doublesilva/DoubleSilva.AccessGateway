@@ -43,7 +43,7 @@ setup() {
   echo 18443 > "$STUB_STATE/green_port"
   : > "$STUB_STATE/calls.log"
 
-  mkdir -p /opt/caddy/config/casa-dashboard /opt/caddy/config/smoke-status /home/diego/containers/authelia/config /etc/homeautomation/certs
+  mkdir -p /opt/caddy/config/smoke-status /home/diego/containers/authelia/config /etc/homeautomation/certs
   cp /repo/tests/baseline/blue.Caddyfile /opt/caddy/Caddyfile
   echo "authelia config ficticia" > /home/diego/containers/authelia/config/configuration.yml
   echo '{"passed": 15, "failed": 3}' > /opt/caddy/config/smoke-status/status.json
@@ -60,6 +60,7 @@ setup() {
   openssl ecparam -name prime256v1 -genkey -noout -out "$P/root.key" 2>/dev/null
   openssl req -x509 -new -key "$P/root.key" -subj "/CN=Teste Root" -days 30 -out "$P/root.crt" 2>/dev/null
   cp "$P/root.crt" /etc/homeautomation/certs/caddy-local-root.crt
+  mkdir -p "$R/shared/public-certs" && cp "$P/root.crt" "$R/shared/public-certs/caddy-root.crt"   # T07.4
   ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP=$(openssl x509 -in "$P/root.crt" -noout -fingerprint -sha256 | cut -d= -f2)
   export ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP
   install -m 600 "$R/app/env/prep.env.example" "$R/accessgateway.env"

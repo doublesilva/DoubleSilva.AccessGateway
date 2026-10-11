@@ -11,6 +11,8 @@ Normalizações (as únicas diferenças permitidas entre Blue e Green):
   - a ordem das chaves é irrelevante; a ordem de listas é preservada (rotas são ordenadas pelo Caddy);
   - rotas exclusivas da Green declaradas com --green-only HOST:CAMINHO (ex.: o dashboard do smoke da T06.4,
     admin.home.doublesilva.com:/status e :/status/*) são removidas da Green antes da comparação, e precisam existir;
+  - --green-replace NOVO=ANTIGO troca textos declarados na Green antes da comparação (ex.: a raiz do cert.home,
+    /config/public-certs na Green desde a T07.4 e /config/casa-dashboard na Blue);
   - nomes de grupos ("group18") são renumerados pela ordem de aparição (a rota extra desloca a numeração).
 Sai com código 0 se forem equivalentes; caso contrário imprime as diferenças e sai com 1.
 """
@@ -114,6 +116,7 @@ def main():
     parser.add_argument("--blue-authelia", default="127.0.0.1:9091")
     parser.add_argument("--green-authelia", default="127.0.0.1:19091")
     parser.add_argument("--green-only", action="append", default=[], metavar="HOST:CAMINHO")
+    parser.add_argument("--green-replace", action="append", default=[], metavar="NOVO=ANTIGO")
     args = parser.parse_args()
 
     with open(args.blue, encoding="utf-8") as f:
@@ -123,6 +126,12 @@ def main():
 
     blue = normalize(blue)
     green = normalize(replace_strings(green, args.green_authelia, args.blue_authelia))
+    for pair in args.green_replace:
+        new, old = pair.split("=", 1)
+        if new not in json.dumps(green):
+            print(f"DIFERENTE: substituição declarada não encontrada na Green: {new}")
+            return 1
+        green = replace_strings(green, new, old)
     only = {tuple(x.split(":", 1)) for x in args.green_only}
     removed = remove_green_only(green, only)
     if removed != only:

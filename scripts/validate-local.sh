@@ -13,7 +13,7 @@
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks).
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -57,10 +57,11 @@ check_caddy() {
   docker run --rm --network none -v "$REPO/tests/baseline:/b:ro" "$CADDY_IMAGE" \
     caddy adapt --config /b/blue.Caddyfile --adapter caddyfile > "$TMP/blue.json" 2>/dev/null
 
-  # Única divergência permitida: o dashboard do smoke (T06.4), exclusivo da Green.
+  # Divergências permitidas: o dashboard do smoke (T06.4) e a origem da raiz pública do cert.home (T07.4).
   if py tests/tools/caddy_parity.py "$TMP/blue.json" "$TMP/green-prod.json" \
-       --green-only admin.home.doublesilva.com:/status --green-only 'admin.home.doublesilva.com:/status/*'; then
-    ok "paridade de rotas Blue == Green (produção; exceto /status do admin, T06.4)"
+       --green-only admin.home.doublesilva.com:/status --green-only 'admin.home.doublesilva.com:/status/*' \
+       --green-replace /config/public-certs=/config/casa-dashboard; then
+    ok "paridade de rotas Blue == Green (produção; exceto /status do admin, T06.4, e a raiz do cert.home, T07.4)"
   else
     bad "paridade de rotas Blue x Green"
   fi
@@ -128,7 +129,7 @@ check_compose() {
   done
   docker compose --env-file env/prep.env.example -f compose.yml config --format json > "$TMP/compose-prep.json" 2>/dev/null
   if py tests/tools/compose_check.py "$TMP/compose-prep.json"; then
-    ok "preparação: loopback 18080/18443/19091, admin 2020, sem portas de produção, Blue só casa-dashboard (ro)"
+    ok "preparação: loopback 18080/18443/19091, admin 2020, sem portas de produção, nenhuma montagem da Blue, public-certs (ro)"
   else
     bad "compose de preparação fora das regras"
   fi
@@ -166,7 +167,7 @@ check_e2e() {
   [ -d "$TMP/secrets" ] || dummy_secrets
   local root="$REPO/$TMP/e2e" curl_tls=(--cacert "$TMP/e2e/data/caddy/caddy/pki/authorities/local/root.crt")
   mkdir -p "$TMP/e2e/data/caddy" "$TMP/e2e/data/caddy-config" "$TMP/e2e/data/authelia" "$TMP/e2e/static/netdata-dashboard" \
-    "$TMP/e2e/casa" "$TMP/e2e/secrets"
+    "$TMP/e2e/shared/public-certs" "$TMP/e2e/secrets"
   cp -r "$TMP/secrets" "$TMP/e2e/secrets/authelia"
   cp "$TMP/data/users_database.yml" "$TMP/e2e/data/authelia/"
   echo '<html>netdata</html>' > "$TMP/e2e/static/netdata-dashboard/index.html"
@@ -178,11 +179,11 @@ check_e2e() {
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) curl_tls+=(--ssl-no-revoke); null_out=NUL ;; esac
 
   local e2e=(docker compose -p accessgateway-e2e -f compose.yml -f tests/e2e/compose.e2e.yml)
-  if ! GATEWAY_ROOT="$root" CASA_DASHBOARD_DIR="$root/casa" "${e2e[@]}" up -d --wait --wait-timeout 120 > "$TMP/e2e.log" 2>&1; then
+  if ! GATEWAY_ROOT="$root" "${e2e[@]}" up -d --wait --wait-timeout 120 > "$TMP/e2e.log" 2>&1; then
     bad "stack não subiu: $(tail -5 "$TMP/e2e.log")"
-    GATEWAY_ROOT="$root" CASA_DASHBOARD_DIR="$root/casa" "${e2e[@]}" logs --tail 30 > "$TMP/e2e-logs.txt" 2>&1 || true
+    GATEWAY_ROOT="$root" "${e2e[@]}" logs --tail 30 > "$TMP/e2e-logs.txt" 2>&1 || true
     tail -20 "$TMP/e2e-logs.txt"
-    GATEWAY_ROOT="$root" CASA_DASHBOARD_DIR="$root/casa" "${e2e[@]}" down -v >/dev/null 2>&1 || true
+    GATEWAY_ROOT="$root" "${e2e[@]}" down -v >/dev/null 2>&1 || true
     return
   fi
   ok "stack Caddy + Authelia saudável"
@@ -215,6 +216,28 @@ check_e2e() {
   [[ "$r" = 000* ]] && ok "dashboard: TLS recusado sem a CA interna (certificado validado)" || bad "dashboard sem CA: $r"
   r=$(e2e_req panel.home.doublesilva.com /stream/x)
   [[ "$r" != *"auth.home.doublesilva.com"* ]] && ok "panel /stream/* sem forward_auth (${r%% *}: upstream ausente no teste)" || bad "panel /stream: $r"
+  # cert.home (T07.4): publica a raiz pública da CA de teste com o script de produção e confere o contrato
+  if docker run --rm -v "$root:/e2e" -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash -c \
+       'apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq openssl >/dev/null 2>&1
+        R=/e2e/data/caddy/caddy/pki/authorities/local/root.crt
+        export GATEWAY_ROOT=/e2e ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP=$(openssl x509 -in $R -noout -fingerprint -sha256 | cut -d= -f2)
+        bash /repo/scripts/publish-public-ca.sh --apply' > "$TMP/publicca.out" 2>&1; then
+    ok "publish-public-ca.sh --apply com a CA de teste: $(grep -o 'publicado: .*' "$TMP/publicca.out")"
+  else
+    bad "publish-public-ca.sh: $(tail -3 "$TMP/publicca.out")"
+  fi
+  local cert_url=http://cert.home/caddy-root.crt cert_out="$TMP/e2e-cert.crt"
+  r=$(curl -sS -o "$cert_out" --max-time 10 --connect-to cert.home:80:127.0.0.1:18080 -w '%{http_code} %{content_type}' "$cert_url" 2>/dev/null || echo 000)
+  if [ "$r" = "200 application/x-x509-ca-cert" ] && cmp -s "$cert_out" "$TMP/e2e/data/caddy/caddy/pki/authorities/local/root.crt" \
+     && ! grep -qi 'PRIVATE' "$cert_out"; then
+    ok "cert.home/caddy-root.crt 200 application/x-x509-ca-cert, idêntico à raiz da PKI, sem chave"
+  else
+    bad "cert.home/caddy-root.crt: $r"
+  fi
+  r=$(curl -sS -o "$null_out" --max-time 10 --connect-to cert.home:80:127.0.0.1:18080 -w '%{http_code}' http://cert.home/root.key 2>/dev/null || echo 000)
+  local r2
+  r2=$(curl -sS -o "$null_out" --max-time 10 --connect-to cert.home:80:127.0.0.1:18080 -w '%{http_code}' http://cert.home/ 2>/dev/null || echo 000)
+  [ "$r" = 404 ] && [ "$r2" = 404 ] && ok "cert.home: qualquer outro caminho 404 (root.key, /)" || bad "cert.home outros caminhos: root.key=$r /=$r2"
   r=$(e2e_req panel.home /a?b=1)
   [ "$r" = "301 https://panel.home.doublesilva.com/a?b=1" ] && ok "panel.home 301 preserva caminho e query" || bad "panel.home: $r"
 
@@ -264,7 +287,7 @@ check_e2e() {
     bad "green-test-user remove: $(tail -3 "$TMP/userrm.out")"
   fi
 
-  GATEWAY_ROOT="$root" CASA_DASHBOARD_DIR="$root/casa" "${e2e[@]}" down -v > /dev/null 2>&1 && ok "stack de teste removida"
+  GATEWAY_ROOT="$root" "${e2e[@]}" down -v > /dev/null 2>&1 && ok "stack de teste removida"
 }
 
 check_cutover() {
@@ -294,12 +317,31 @@ check_status() {
   fi
 }
 
+check_publicca() {
+  step "Raiz pública da CA (T07.4: publish-public-ca.sh com CA fictícia)"
+  if docker run --rm -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/public-ca/public-ca-test.sh > "$TMP/publicca-unit.out" 2>&1; then
+    ok "public-ca: $(tail -1 "$TMP/publicca-unit.out")"
+  else
+    bad "public-ca: $(grep -E '^\[FAIL\]' "$TMP/publicca-unit.out" | head -8)"
+  fi
+}
+
+check_recreate() {
+  step "Recriação controlada do Caddy da Green (T07.4.2; docker/curl simulados)"
+  if docker run --rm -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/caddy-recreate/caddy-recreate-test.sh > "$TMP/recreate.out" 2>&1; then
+    ok "green-caddy-recreate: $(tail -1 "$TMP/recreate.out")"
+  else
+    bad "green-caddy-recreate: $(grep -E '^\[FAIL\]' "$TMP/recreate.out" | head -8)"
+  fi
+}
+
 check_lint() {
   step "Lint e segredos"
   if docker run --rm --network none -v "$REPO:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
       -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh \
       tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh infra/home-smoke-test/smoke-paths.sh \
-      tests/status-dashboard/*.sh tests/status-dashboard/stubs/* \
+      tests/status-dashboard/*.sh tests/status-dashboard/stubs/* tests/public-ca/*.sh \
+      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* \
       infra/accessgateway-status-sync/accessgateway-status-sync infra/accessgateway-status-sync/install.sh \
       infra/home-server-backup/backup-home-server infra/home-server-backup/tests/*.sh \
       > "$TMP/shellcheck.out" 2>&1; then
@@ -321,7 +363,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate lint}"; do
   for s in $section; do "check_$s"; done
 done
 

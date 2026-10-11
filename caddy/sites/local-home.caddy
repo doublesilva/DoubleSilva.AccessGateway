@@ -58,13 +58,14 @@ casa.home {
 	reverse_proxy 127.0.0.1:5300
 }
 
-# Distribuição da raiz da CA interna (somente HTTP). O arquivo vem de /config/casa-dashboard, publicado pelo
-# deploy do HomeAutomation (montado somente leitura na Green).
+# Distribuição da raiz PÚBLICA da CA interna (somente HTTP: o dispositivo ainda não confia na CA). Desde a T07.4 o
+# arquivo vem de /config/public-certs (scripts/publish-public-ca.sh; montagem somente leitura), não mais do
+# casa-dashboard publicado pelo HomeAutomation em /opt/caddy. Contrato preservado: mesma URL e mesmo Content-Type.
 http://cert.home {
 	@rootCert path /caddy-root.crt
 
 	handle @rootCert {
-		root * /config/casa-dashboard
+		root * /config/public-certs
 		header Content-Type application/x-x509-ca-cert
 		file_server
 	}
