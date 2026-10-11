@@ -40,7 +40,7 @@ sudo $A/cutover.sh --kuma-token-rotated # digitar CUTOVER
 | E8 | Caddy da Green em 80/443 | "Indisponibilidade estimada: N s" | N menor que 60 | **rollback automático** |
 | E9 | 443 em `127.0.0.1`, `192.168.0.162` e `100.115.190.21`; validate (33); cert (20/20); OIDC (9); tokens (5) | `RESULTADO … 0 FAIL` em cada uma | todos sem FAIL | **rollback automático** |
 | E10 | pergunta dos logins reais | §2 | "s" só se os 3 logins passarem | resposta "N" → **rollback automático** |
-| E11 | smoke | contagem | só falhas conhecidas (3 do baseline + 2 do container `caddy` parado) | outra falha: avaliar; em dúvida, **rollback** |
+| E11 | smoke | contagem | só as 3 falhas do baseline (desde a T06.1 o smoke valida o gateway ativo) | outra falha: avaliar; em dúvida, **rollback** |
 
 Interrupção do script (queda do SSH fora do `tmux`, Ctrl+C, kill) entre a E5 e a E10 → **rollback automático pelo
 trap**, registrado no log.

@@ -48,7 +48,7 @@ sudo /srv/accessgateway/app/scripts/cutover.sh --kuma-token-rotated          # d
 | E8 | sobe o Caddy da Green em 80/443; aguarda `auth /api/health` = 200 (até 60 s) | **rollback automático** |
 | E9 | 443 em `127.0.0.1`, `192.168.0.162` e `100.115.190.21`; `validate-green.sh` 443/80; `cert-check.sh`; `oidc-clients-check.sh`; `token-interop-check.sh` | **rollback automático** |
 | E10 | **logins reais** (§4); o operador confirma | se não confirmar: **rollback automático** |
-| E11 | `home-smoke-test`: esperadas as 3 falhas do baseline + 2 do container `caddy` parado | outras falhas: o operador avalia |
+| E11 | `home-smoke-test`: esperadas só as 3 falhas do baseline (smoke da T06.1) | outras falhas: o operador avalia |
 
 Log completo: `/srv/accessgateway/logs/cutover-<data>.log`. Interrupção (INT/TERM/HUP) entre a E5 e a E10 dispara o
 rollback automático (trap); fora do `tmux`, o script recusa iniciar (salvo `--allow-no-tmux`). A sessão é identificada
@@ -127,7 +127,7 @@ restic, fixar a imagem `caddy:2.11.4` e executar `docker compose up -d` nos dire
 | `deploy-jarvis` | só o projeto `jarvis` | nenhuma |
 | Reinício do servidor ou do Docker | `caddy` (Blue) foi **parado manualmente**: com `restart: unless-stopped` ele permanece parado; a Green (`unless-stopped`) sobe sozinha | nenhuma |
 | **`docker compose up -d` manual em `/opt/caddy`**, ou "start" pelo Portainer | iniciaria o Caddy da Blue disputando 80/443 com a Green: falha de bind e loop de reinício | **T05:** `docker update --restart=no caddy` e um aviso no diretório (`/opt/caddy/DESATIVADO-ver-accessgateway.txt`); até lá, registrar no runbook e avisar quem opera o servidor |
-| `home-smoke-test` | 2 falhas esperadas (container `caddy` parado e `docker exec caddy caddy validate`) | **T05:** parametrizar o nome do container (`accessgateway-caddy`) e o caminho do Caddyfile |
+| `home-smoke-test` | **resolvido na T06.1:** identifica o gateway ativo (Blue ou Green) pela porta 443 | nenhuma ([T06.1-relatorio.md](T06.1-relatorio.md)) |
 | `deploy-green.sh` | recusa o modo produção (por desenho) | atualizações da Green em produção: novo procedimento na T05 |
 | Backup (`backup-home-server`) | já inclui `/srv/accessgateway` e o banco da Green por snapshot (P10) | conferir a primeira execução após o cutover |
 
