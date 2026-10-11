@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# ============================================================================================================
+# AVISO (T07.2): a Green está EM PRODUÇÃO desde 11/10/2026.
+# "create" adiciona usuários de teste ao Authelia DE PRODUÇÃO: só com autorização explícita, e "remove" logo após.
+# ============================================================================================================
 # Usuários de teste EXCLUSIVOS da Green para validar autenticação e autorização (T03.2/T03.3).
 #
 #   green-teste        grupo home-user   senha em $GATEWAY_ROOT/secrets/green-test-user.password

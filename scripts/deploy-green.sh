@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ============================================================================================================
+# AVISO (T07.2): a Green está EM PRODUÇÃO desde 11/10/2026.
+# Ferramenta da PREPARAÇÃO (T03): recusa o modo produção. Atualizações da Green em produção: scripts/caddy-reload.sh
+# (configuração do Caddy) e os procedimentos das tarefas T06/T07. Ver docs/T07.1-inventario.md.
+# ============================================================================================================
 # Sobe (ou atualiza) a Green em MODO PREPARAÇÃO (T03). Recusa qualquer configuração de produção.
 #
 # Pré-condições verificadas: root; arquivo de ambiente em modo prep; release em $GATEWAY_APP_DIR; segredos, usuários,

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ============================================================================================================
+# AVISO (T07.2): a Green está EM PRODUÇÃO desde 11/10/2026.
+# O cutover já foi executado; com a Green ativa este script só revalida. Para voltar à Blue use rollback.sh
+# (runbook docs/T04-cutover-runbook.md §5). Ver /opt/caddy/README-PRODUCAO.md.
+# ============================================================================================================
 # Cutover supervisionado Blue → Green do AccessGateway (T04.2). NÃO altera DNS, UFW nem redes.
 #
 #   cutover.sh --plan                       somente verificações (sem nenhuma alteração) e o roteiro das etapas
