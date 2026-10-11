@@ -13,7 +13,7 @@
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks).
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -335,6 +335,15 @@ check_recreate() {
   fi
 }
 
+check_deployha() {
+  step "deploy-homeautomation sem publicação em /opt/caddy (T07.4.1b; sandbox com docker/curl simulados)"
+  if docker run --rm -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/deploy-homeautomation/deploy-ha-test.sh > "$TMP/deployha.out" 2>&1; then
+    ok "deploy-homeautomation: $(tail -1 "$TMP/deployha.out")"
+  else
+    bad "deploy-homeautomation: $(grep -E '^\[FAIL\]' "$TMP/deployha.out" | head -8)"
+  fi
+}
+
 check_lint() {
   step "Lint e segredos"
   if docker run --rm --network none -v "$REPO:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
@@ -342,12 +351,21 @@ check_lint() {
       tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh infra/home-smoke-test/smoke-paths.sh \
       tests/status-dashboard/*.sh tests/status-dashboard/stubs/* tests/public-ca/*.sh \
       tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* \
+      tests/deploy-homeautomation/*.sh infra/deploy-homeautomation/install.sh \
       infra/accessgateway-status-sync/accessgateway-status-sync infra/accessgateway-status-sync/install.sh \
       infra/home-server-backup/backup-home-server infra/home-server-backup/tests/*.sh \
       > "$TMP/shellcheck.out" 2>&1; then
     ok "shellcheck (scripts, infra e testes)"
   else
     bad "shellcheck: $(head -20 "$TMP/shellcheck.out")"
+  fi
+  # deploy-homeautomation (do servidor, alterado só por remoção na T07.4.1b): SC2034 ("attempt" sem uso no laço de
+  # espera da API) já existe no original de 22/09 e fica fora do patch mínimo.
+  if docker run --rm --network none -v "$REPO:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" -S warning -e SC2034 \
+      infra/deploy-homeautomation/deploy-homeautomation > "$TMP/shellcheck-deployha.out" 2>&1; then
+    ok "shellcheck deploy-homeautomation (SC2034 preexistente registrado)"
+  else
+    bad "shellcheck deploy-homeautomation: $(head -20 "$TMP/shellcheck-deployha.out")"
   fi
   if docker run --rm --network none -v "$REPO:/repo:ro" "$GITLEAKS_IMAGE" \
       dir /repo --config /repo/.gitleaks.toml --no-banner --redact > "$TMP/gitleaks.out" 2>&1; then
@@ -363,7 +381,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha lint}"; do
   for s in $section; do "check_$s"; done
 done
 
