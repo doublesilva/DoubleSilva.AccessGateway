@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Stub de systemctl: backup inativo, última execução bem-sucedida há 1 h, próximo disparo em 5 h.
+# BACKUP_ACTIVE=1 simula backup em execução.
+case "$*" in
+  *"is-active home-server-backup.service"*) [ "${BACKUP_ACTIVE:-0}" = 1 ] && echo active || echo inactive ;;
+  *"-p Result --value"*) echo success ;;
+  *"ExecMainExitTimestamp"*) date -d '-1 hour' '+%a %Y-%m-%d %H:%M:%S %Z' ;;
+  *"NextElapseUSecRealtime"*) date -d '+5 hour' '+%a %Y-%m-%d %H:%M:%S %Z' ;;
+esac
+exit 0

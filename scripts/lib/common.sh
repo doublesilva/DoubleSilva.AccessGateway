@@ -19,9 +19,38 @@ BLUE_AUTHELIA_CONFIG=$BLUE_AUTHELIA_DIR/config/configuration.yml
 # Baseline coletada na T01/T02 (2026-10-10).
 EXPECTED_ROOT_FP="${ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP:-AD:F8:85:14:FF:96:F1:71:93:E3:84:90:8F:A4:43:42:FE:7F:62:48:53:79:32:14:44:A8:8C:B2:D9:C2:38:56}"
 BLUE_CADDYFILE_SHA256=97138770033ff281944f0dfa32ba6437e97a3ff2184edf37f7bacdd9042a492a # gitleaks:allow (hash público para detectar deriva)
-BLUE_AUTHELIA_CONFIG_SHA256=e0d721766e31663a58285916027e1ccecdc385d563e1b9a7b0fe6947c92ec16b # gitleaks:allow (hash público para detectar deriva)
+BLUE_AUTHELIA_CONFIG_SHA256="${ACCESSGATEWAY_TEST_BLUE_AUTHELIA_SHA256:-e0d721766e31663a58285916027e1ccecdc385d563e1b9a7b0fe6947c92ec16b}" # gitleaks:allow (hash público para detectar deriva)
 
 OIDC_CLIENTS=(homeautomation-panel homeautomation-outhome jarvis-home saldo360)
+
+# Green e cutover (T04)
+GREEN_CADDY=accessgateway-caddy
+GREEN_AUTHELIA=accessgateway-authelia
+GATEWAY_LOG_DIR="${GATEWAY_LOG_DIR:-$GATEWAY_ROOT/logs}"
+GATEWAY_PREP_ENV_BACKUP="$GATEWAY_ROOT/accessgateway.prep.env"
+CA_PUBLIC=/etc/homeautomation/certs/caddy-local-root.crt
+LAN_IP=192.168.0.162
+TAILSCALE_IP=100.115.190.21
+TEST_USER_NAMES=(green-teste green-admin-teste)
+
+# Porta HTTPS publicada pelo Caddy da Green (vazio se não estiver em execução)
+green_https_port() { docker inspect "$GREEN_CADDY" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^GATEWAY_HTTPS_PORT=//p'; }
+
+# Estado do gateway de produção: blue | green | nenhum | ambos (anômalo)
+production_owner() {
+  local blue=0 green=0
+  container_running caddy && blue=1
+  container_running "$GREEN_CADDY" && [ "$(green_https_port)" = 443 ] && green=1
+  case "$blue$green" in 10) echo blue ;; 01) echo green ;; 00) echo nenhum ;; *) echo ambos ;; esac
+}
+
+# Código HTTP de https://<host><caminho> num IP/porta (validação de TLS pela raiz pública)
+https_code() { # host caminho [porta] [ip]
+  curl -sS -o /dev/null -w '%{http_code}' --max-time 5 --cacert "$CA_PUBLIC" \
+    --connect-to "$1:443:${4:-127.0.0.1}:${3:-443}" "https://$1$2" 2>/dev/null || echo 000
+}
+
+test_users_present() { local u; for u in "${TEST_USER_NAMES[@]}"; do grep -qE "^  $u:[[:space:]]*$" "$1" && return 0; done; return 1; }
 
 log()  { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { printf '[%s] AVISO: %s\n' "$(date +%H:%M:%S)" "$*" >&2; }

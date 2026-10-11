@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Stub de curl: responde conforme quem atende cada porta no estado simulado ($STUB_STATE).
+#   443: Blue (container caddy) ou Green (accessgateway-caddy iniciado com 443), salvo FAIL_GREEN_HTTP=1 para a Green
+#   19091: Authelia da Green
+S=${STUB_STATE:?}
+run() { [ -e "$S/running/$1" ]; }
+port=""; url=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = --connect-to ] && port=$(awk -F: '{print $4}' <<<"$a")
+  case "$a" in http*://*) url=$a ;; esac
+  prev=$a
+done
+code=000
+if [[ "$url" == http://127.0.0.1:19091/* ]]; then
+  run accessgateway-authelia && code=200
+else
+  serving=0
+  if [ "$port" = 443 ]; then
+    run caddy && serving=1
+    if run accessgateway-caddy && [ "$(cat "$S/green_port" 2>/dev/null)" = 443 ] && [ "${FAIL_GREEN_HTTP:-0}" != 1 ]; then serving=1; fi
+  fi
+  if [ "$serving" = 1 ]; then
+    case "$url" in
+      */api/health) code=200 ;;
+      https://kuma.home.doublesilva.com/*) code=302 ;;
+      https://casa.home/*) code=200 ;;
+      *) code=200 ;;
+    esac
+  fi
+fi
+printf '%s' "$code"

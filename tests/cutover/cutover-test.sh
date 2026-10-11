@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Testes de orquestração do cutover.sh e do rollback.sh com docker/curl/ss/systemctl simulados (tests/cutover/stubs).
+# Executado num container Ubuntu descartável (scripts/validate-local.sh cutover). Nada real é parado ou iniciado.
+set -Eeuo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >/dev/null && apt-get install -y -qq openssl python3 >/dev/null 2>&1
+
+PASS=0
+FAIL=0
+ok()  { printf '[PASS] %s\n' "$1"; PASS=$((PASS + 1)); }
+bad() { printf '[FAIL] %s\n' "$1"; FAIL=$((FAIL + 1)); }
+check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
+
+export STUB_STATE=/tmp/stub
+export PATH="/repo/tests/cutover/stubs:$PATH"
+export WAIT_SECONDS=2
+R=/srv/accessgateway
+
+# ------------------------------------------------------------------ ambiente simulado
+setup() {
+  rm -rf "$STUB_STATE" "$R" /opt/caddy /home/diego /etc/homeautomation
+  mkdir -p "$STUB_STATE/running" "$STUB_STATE/known"
+  for c in caddy authelia accessgateway-caddy accessgateway-authelia; do touch "$STUB_STATE/known/$c"; done
+  touch "$STUB_STATE/running/caddy" "$STUB_STATE/running/authelia" \
+        "$STUB_STATE/running/accessgateway-caddy" "$STUB_STATE/running/accessgateway-authelia"
+  echo 18443 > "$STUB_STATE/green_port"
+  : > "$STUB_STATE/calls.log"
+
+  mkdir -p /opt/caddy/config/casa-dashboard /opt/caddy/config/smoke-status /home/diego/containers/authelia/config /etc/homeautomation/certs
+  cp /repo/tests/baseline/blue.Caddyfile /opt/caddy/Caddyfile
+  echo "authelia config ficticia" > /home/diego/containers/authelia/config/configuration.yml
+  echo '{"passed": 15, "failed": 3}' > /opt/caddy/config/smoke-status/status.json
+  ACCESSGATEWAY_TEST_BLUE_AUTHELIA_SHA256=$(sha256sum /home/diego/containers/authelia/config/configuration.yml | cut -d' ' -f1)
+  export ACCESSGATEWAY_TEST_BLUE_AUTHELIA_SHA256
+
+  install -d -m 750 "$R"; mkdir -p "$R/app" "$R/secrets/authelia/oidc/clients" "$R/data/authelia" "$R/data/caddy/caddy/pki/authorities/local"
+  (cd /repo && tar -cf - --exclude=.tmp --exclude=.git .) | tar -xf - -C "$R/app"
+  (cd "$R/app" && find . -type f ! -name RELEASE.sha256 -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum > RELEASE.sha256)
+  for f in JWT_SECRET SESSION_SECRET STORAGE_ENCRYPTION_KEY oidc/hmac_secret oidc/jwks-rsa.key; do echo x > "$R/secrets/authelia/$f"; chmod 600 "$R/secrets/authelia/$f"; done
+  for c in homeautomation-panel homeautomation-outhome jarvis-home saldo360; do echo '$pbkdf2-x' > "$R/secrets/authelia/oidc/clients/$c.digest"; done
+  printf 'users:\n  diego:\n    disabled: false\n    groups:\n      - home-admin\n' > "$R/data/authelia/users_database.yml"
+  P="$R/data/caddy/caddy/pki/authorities/local"
+  openssl ecparam -name prime256v1 -genkey -noout -out "$P/root.key" 2>/dev/null
+  openssl req -x509 -new -key "$P/root.key" -subj "/CN=Teste Root" -days 30 -out "$P/root.crt" 2>/dev/null
+  cp "$P/root.crt" /etc/homeautomation/certs/caddy-local-root.crt
+  ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP=$(openssl x509 -in "$P/root.crt" -noout -fingerprint -sha256 | cut -d= -f2)
+  export ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP
+  install -m 600 "$R/app/env/prep.env.example" "$R/accessgateway.env"
+
+  export SNAPSHOT_CMD="echo snapshot-simulado" VALIDATE_CMD=true CERT_CMD=true OIDC_CMD=true TOKEN_CMD=true
+  export SMOKE_CMD=/tmp/smoke.sh
+  printf '#!/bin/sh\necho "[PASS] casa.home pela LAN"\necho "[FAIL] Container caddy não está em execução"\necho "[FAIL] Caddyfile inválido"\n' > /tmp/smoke.sh
+  chmod +x /tmp/smoke.sh
+  unset FAIL_GREEN_HTTP FAIL_AUTHELIA BACKUP_ACTIVE
+}
+
+owner() { STUB_STATE=$STUB_STATE bash -c '. /repo/scripts/lib/common.sh; production_owner'; }
+mode()  { sed -n 's/^GATEWAY_MODE=//p' "$R/accessgateway.env"; }
+changes() { grep -cE 'docker (stop|compose .*(stop|start|up|down))' "$STUB_STATE/calls.log" || true; }
+
+CUT="bash $R/app/scripts/cutover.sh"
+RB="bash $R/app/scripts/rollback.sh"
+
+# 1. --plan sem confirmação do Kuma: bloqueio, nada alterado
+setup
+if $CUT --plan > /tmp/t1.log 2>&1; then bad "plan sem --kuma-token-rotated deveria acusar bloqueio"; else ok "plan sem --kuma-token-rotated: BLOQUEIO de segurança"; fi
+check "plan: nenhuma operação de stop/start/up" test "$(changes)" -eq 0
+check "plan: log gravado em $R/logs" bash -c "ls $R/logs/cutover-*-plan.log >/dev/null"
+
+# 2. --plan com confirmação: todas as pré-verificações OK
+setup
+check "plan com --kuma-token-rotated: 0 pendências" $CUT --plan --kuma-token-rotated
+check "plan: Blue continua dona de 80/443" test "$(owner)" = blue
+
+# 3. pré-verificação falha (usuário de teste presente) → nada alterado
+setup
+printf '  green-teste:\n    disabled: false\n' >> "$R/data/authelia/users_database.yml"
+if $CUT --kuma-token-rotated --yes > /tmp/t3.log 2>&1; then bad "cutover deveria recusar com usuário de teste"; else ok "cutover recusado: usuário de teste presente"; fi
+check "recusa: nenhuma alteração (Blue dona, Green intacta)" bash -c "[ \"\$(grep -cE 'docker (stop|compose .*(stop|start|up))' $STUB_STATE/calls.log)\" -eq 0 ]"
+
+# 4. backup em execução → recusa
+setup
+export BACKUP_ACTIVE=1
+if $CUT --kuma-token-rotated --yes > /tmp/t4.log 2>&1; then bad "cutover deveria recusar com backup ativo"; else ok "cutover recusado: backup em execução"; fi
+unset BACKUP_ACTIVE
+
+# 5. cutover completo
+setup
+if bash ${CUTOVER_TRACE:+-x} $R/app/scripts/cutover.sh --kuma-token-rotated --yes > /tmp/t5.log 2>&1; then ok "cutover completo concluído"; else bad "cutover completo concluído"; echo "rc/log:"; cat /tmp/t5.log | tail -15; tail -20 "$(ls -t $R/logs/cutover-* | head -1)"; tail -6 "$STUB_STATE/calls.log"; fi
+check "Green dona de 80/443" test "$(owner)" = green
+check "ambiente da Green em modo cutover; cópia do prep preservada" bash -c "[ \"\$(sed -n 's/^GATEWAY_MODE=//p' $R/accessgateway.env)\" = cutover ] && grep -q '^GATEWAY_MODE=prep' $R/accessgateway.prep.env"
+check "Authelia da Blue mantido em execução (rollback)" test -e "$STUB_STATE/running/authelia"
+order=$(grep -nE 'compose --env-file .* stop$|compose --env-file .* up .* authelia|compose -f /opt/caddy/compose.yml stop caddy|compose --env-file .* up -d caddy' "$STUB_STATE/calls.log" | cut -d: -f1 | paste -sd' ')
+check "ordem: stop Green → up Authelia Green → stop Caddy Blue → up Caddy Green ($order)" \
+  bash -c "set -- $order; [ \$# -eq 4 ] && [ \$1 -lt \$2 ] && [ \$2 -lt \$3 ] && [ \$3 -lt \$4 ]"
+check "Blue nunca recriada (sem 'up' no compose da Blue)" bash -c "! grep -q 'compose -f /opt/caddy/compose.yml up' $STUB_STATE/calls.log"
+
+# 6. idempotência: segunda execução apenas revalida
+before=$(changes)
+check "segunda execução: idempotente (revalida)" $CUT --kuma-token-rotated --yes
+check "segunda execução: nenhuma nova operação" test "$(changes)" -eq "$before"
+
+# 7. rollback após cutover
+check "rollback --cutover --yes" $RB --cutover --yes
+check "rollback: Blue dona de 80/443" test "$(owner)" = blue
+check "rollback: ambiente prep restaurado" test "$(mode)" = prep
+check "rollback: Blue iniciada com start (sem up)" bash -c "grep -q 'compose -f /opt/caddy/compose.yml start caddy' $STUB_STATE/calls.log && ! grep -q 'compose -f /opt/caddy/compose.yml up' $STUB_STATE/calls.log"
+check "rollback repetido: idempotente" $RB --cutover --yes
+
+# 8. falha na E8 (Green não responde em 443) → rollback automático
+setup
+export FAIL_GREEN_HTTP=1
+if $CUT --kuma-token-rotated --yes > /tmp/t8.log 2>&1; then bad "falha na E8 deveria terminar com erro"; else ok "falha na E8 detectada"; fi
+check "E8: rollback automático executado" grep -q 'rollback automático' /tmp/t8.log
+check "E8: Blue de volta a 80/443" test "$(owner)" = blue
+check "E8: ambiente prep restaurado" test "$(mode)" = prep
+unset FAIL_GREEN_HTTP
+
+# 9. falha na E9 (validação) → rollback automático
+setup
+export VALIDATE_CMD=false
+if $CUT --kuma-token-rotated --yes > /tmp/t9.log 2>&1; then bad "falha na E9 deveria terminar com erro"; else ok "falha na E9 detectada"; fi
+check "E9: Blue de volta a 80/443" test "$(owner)" = blue
+
+# 10. falha na E6 (Authelia da Green) → rollback sem precisar iniciar a Blue (ainda no ar)
+setup
+export FAIL_AUTHELIA=1
+if $CUT --kuma-token-rotated --yes > /tmp/t10.log 2>&1; then bad "falha na E6 deveria terminar com erro"; else ok "falha na E6 detectada"; fi
+check "E6: Blue nunca foi parada" bash -c "! grep -q 'compose -f /opt/caddy/compose.yml stop caddy' $STUB_STATE/calls.log"
+check "E6: Blue dona de 80/443; ambiente prep restaurado" bash -c "[ \"\$(sed -n 's/^GATEWAY_MODE=//p' $R/accessgateway.env)\" = prep ]"
+unset FAIL_AUTHELIA
+
+# 11. --no-auto-rollback: falha mantém o estado para o operador
+setup
+export FAIL_GREEN_HTTP=1
+$CUT --kuma-token-rotated --yes --no-auto-rollback > /tmp/t11.log 2>&1 || true
+check "sem rollback automático: estado preservado e instrução registrada" grep -q 'Rollback automático desativado' /tmp/t11.log
+unset FAIL_GREEN_HTTP
+$RB --cutover --yes > /dev/null 2>&1 && check "rollback manual posterior: Blue dona" test "$(owner)" = blue
+
+# 12. rollback --plan não altera nada
+setup
+before=$(changes)
+check "rollback --cutover --plan" $RB --cutover --plan
+check "rollback --plan: nenhuma operação" test "$(changes)" -eq "$before"
+
+printf '\nRESULTADO: %d PASS, %d FAIL\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

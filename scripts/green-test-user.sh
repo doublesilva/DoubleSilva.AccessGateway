@@ -100,6 +100,14 @@ remove() {
     fi
     rm -f "$f"
   done
+  # Cópia feita no create (contém os mesmos hashes da Blue): não deve permanecer na Green.
+  if [ -e "$USERS_FILE.antes-usuario-teste" ]; then rm -f "$USERS_FILE.antes-usuario-teste"; log "cópia anterior do users_database.yml apagada"; fi
+  local left=0
+  for entry in "${TEST_USERS[@]}"; do
+    IFS='|' read -r u g f <<<"$entry"
+    if user_present "$u" || [ -e "$f" ]; then left=1; fi
+  done
+  [ "$left" -eq 0 ] && log "verificação: nenhum usuário de teste nem senha de teste restante" || die "restaram credenciais de teste"
 }
 
 PASS=0

@@ -13,7 +13,7 @@
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks).
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -252,23 +252,40 @@ check_e2e() {
   GATEWAY_ROOT="$root" CASA_DASHBOARD_DIR="$root/casa" "${e2e[@]}" down -v > /dev/null 2>&1 && ok "stack de teste removida"
 }
 
+check_cutover() {
+  step "Orquestração de cutover e rollback (docker/curl/ss/systemctl simulados)"
+  if docker run --rm -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/cutover/cutover-test.sh > "$TMP/cutover.out" 2>&1; then
+    ok "cutover/rollback: $(tail -1 "$TMP/cutover.out")"
+  else
+    bad "cutover/rollback: $(grep -E '^\[FAIL\]' "$TMP/cutover.out" | head -8)"
+  fi
+}
+
 check_lint() {
   step "Lint e segredos"
   if docker run --rm --network none -v "$REPO:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
-      -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh > "$TMP/shellcheck.out" 2>&1; then
-    ok "shellcheck"
+      -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh \
+      tests/cutover/*.sh tests/cutover/stubs/* infra/home-server-backup/backup-home-server infra/home-server-backup/tests/*.sh \
+      > "$TMP/shellcheck.out" 2>&1; then
+    ok "shellcheck (scripts, infra e testes)"
   else
     bad "shellcheck: $(head -20 "$TMP/shellcheck.out")"
   fi
   if docker run --rm --network none -v "$REPO:/repo:ro" "$GITLEAKS_IMAGE" \
       dir /repo --config /repo/.gitleaks.toml --no-banner --redact > "$TMP/gitleaks.out" 2>&1; then
-    ok "gitleaks: nenhum segredo no repositório"
+    ok "gitleaks (arquivos): nenhum segredo"
   else
-    bad "gitleaks: $(tail -10 "$TMP/gitleaks.out")"
+    bad "gitleaks (arquivos): $(tail -10 "$TMP/gitleaks.out")"
+  fi
+  if docker run --rm --network none -v "$REPO:/repo:ro" "$GITLEAKS_IMAGE" \
+      git /repo --config /repo/.gitleaks.toml --no-banner --redact > "$TMP/gitleaks-git.out" 2>&1; then
+    ok "gitleaks (histórico do git, $(git rev-list --count HEAD) commits): nenhum segredo"
+  else
+    bad "gitleaks (histórico): $(tail -10 "$TMP/gitleaks-git.out")"
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover lint}"; do
   for s in $section; do "check_$s"; done
 done
 
