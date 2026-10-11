@@ -20,7 +20,8 @@ marcado, o rollback é obrigatório.
 ## 1. Virada
 
 Abra o `tmux` **sozinho** e digite os demais comandos dentro dele. Não cole o `tmux new` junto com os outros comandos:
-o tmux abre e fecha imediatamente, e o resto roda fora dele. O `cutover.sh` detecta isso e recusa iniciar.
+o tmux abre e fecha imediatamente, e o resto roda fora dele. O `cutover.sh` detecta isso e recusa iniciar. Use `sudo`
+comum (sem `--preserve-env`): a sessão é reconhecida pela árvore de processos.
 
 ```sh
 tmux new -s cutover                     # 1º comando, isolado; se a conexão cair: ssh home-server; tmux attach -t cutover

@@ -51,7 +51,9 @@ sudo /srv/accessgateway/app/scripts/cutover.sh --kuma-token-rotated          # d
 | E11 | `home-smoke-test`: esperadas as 3 falhas do baseline + 2 do container `caddy` parado | outras falhas: o operador avalia |
 
 Log completo: `/srv/accessgateway/logs/cutover-<data>.log`. Interrupção (INT/TERM/HUP) entre a E5 e a E10 dispara o
-rollback automático (trap); fora do `tmux`, o script recusa iniciar (salvo `--allow-no-tmux`). Folha do operador:
+rollback automático (trap); fora do `tmux`, o script recusa iniciar (salvo `--allow-no-tmux`). A sessão é identificada
+pela árvore de processos (ancestral cujo executável é `tmux`/`screen`), não pelas variáveis `TMUX`/`STY`: funciona com
+`sudo` comum (que remove essas variáveis) e não é enganada por variáveis definidas à mão. Folha do operador:
 [T04-operador.md](T04-operador.md).
 
 ## 4. Validação pós-cutover

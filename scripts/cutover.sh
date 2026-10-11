@@ -143,7 +143,12 @@ check "segredos (600), digests dos clients e CA da Green (fingerprint + par de c
 check "diretório casa-dashboard presente" test -d /opt/caddy/config/casa-dashboard
 check "raiz pública da CA legível" test -r "$CA_PUBLIC"
 check "arquivo de ambiente de produção disponível (env/cutover.env.example)" test -f "$GATEWAY_APP_DIR/env/cutover.env.example"
-in_multiplexer() { [ -n "${TMUX:-}" ] || [ -n "${STY:-}" ] || [ "$ALLOW_NO_TMUX" = 1 ]; }
+in_multiplexer() { # pela árvore de processos (funciona com sudo, que remove TMUX/STY; variáveis não bastam)
+  local m
+  if m=$(multiplexer_ancestor); then log "       sessão multiplexer: $m"; return 0; fi
+  [ -z "${TMUX:-}${STY:-}" ] || log "       TMUX/STY definidos, mas nenhum processo tmux/screen na ancestralidade: ignorados"
+  [ "$ALLOW_NO_TMUX" = 1 ] && log "       --allow-no-tmux: exigência dispensada pelo operador"
+}
 check "execução dentro do tmux/screen (queda do SSH não interrompe a virada)" in_multiplexer
 if [ "$KUMA_OK" = 1 ]; then
   log "[OK]   rotação do token do Kuma declarada pelo operador (--kuma-token-rotated)"

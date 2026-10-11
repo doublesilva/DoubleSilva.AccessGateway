@@ -89,6 +89,22 @@ key_matches_cert() {
 
 container_running() { [ "$(docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
 
+# Sessão tmux/screen real na ancestralidade do processo. Não usa TMUX/STY: o sudo os remove e qualquer um pode
+# defini-los. Sobe a árvore por /proc/<pid>/stat (PPID) e identifica cada processo pelo executável (/proc/<pid>/exe;
+# /proc/<pid>/comm quando o exe não é legível, ex.: sudo sem CAP_SYS_PTRACE). Imprime "tmux (pid N)" e retorna 0.
+multiplexer_ancestor() { # [pid]
+  local pid=${1:-$$} name stat ppid hops=0
+  while [ "$pid" -gt 1 ] && [ "$hops" -lt 64 ]; do
+    name=$(readlink "/proc/$pid/exe" 2>/dev/null) || name=$(cat "/proc/$pid/comm" 2>/dev/null) || return 1
+    name=${name##*/}
+    case "$name" in tmux*|screen*|SCREEN*) echo "${name%% *} (pid $pid)"; return 0 ;; esac
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    read -r _ ppid _ <<< "${stat##*) }"   # campos após "(comm) ": estado, PPID, ...
+    pid=$ppid; hops=$((hops + 1))
+  done
+  return 1
+}
+
 # Estado da Blue: containers em execução e arquivos sem alteração em relação à baseline.
 blue_status() {
   local rc=0

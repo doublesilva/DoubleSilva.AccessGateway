@@ -3,7 +3,15 @@
 # Executado num container Ubuntu descartável (scripts/validate-local.sh cutover). Nada real é parado ou iniciado.
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >/dev/null && apt-get install -y -qq openssl python3 >/dev/null 2>&1
+if [ -z "${CUTOVER_TEST_IN_TMUX:-}" ]; then
+  apt-get update -qq >/dev/null && apt-get install -y -qq openssl python3 tmux sudo >/dev/null 2>&1
+  # A suíte roda dentro de uma sessão tmux real: cutover.sh identifica o multiplexer pela árvore de processos.
+  rm -f /tmp/suite.rc
+  TERM=xterm tmux new-session -d -s testes "CUTOVER_TEST_IN_TMUX=1 bash $0 > /tmp/suite.out 2>&1; echo \$? > /tmp/suite.rc"
+  for _ in $(seq 1 900); do [ -f /tmp/suite.rc ] && break; sleep 1; done
+  cat /tmp/suite.out
+  exit "$(cat /tmp/suite.rc 2>/dev/null || echo 99)"
+fi
 
 PASS=0
 FAIL=0
@@ -14,8 +22,16 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 export STUB_STATE=/tmp/stub
 export PATH="/repo/tests/cutover/stubs:$PATH"
 export WAIT_SECONDS=2
-export TMUX=teste   # cutover.sh exige tmux/screen (ou --allow-no-tmux)
 R=/srv/accessgateway
+
+# Executa um comando FORA de qualquer tmux: setsid -f desliga o processo da árvore, que é reparentado ao init (PID 1).
+outside_tmux() {
+  rm -f /tmp/out.rc
+  setsid -f bash -c 'for _ in $(seq 1 50); do read -r _ _ _ pp _ < /proc/$$/stat; [ "$pp" = 1 ] && break; sleep 0.1; done
+                     "$@" > /tmp/out.log 2>&1; echo $? > /tmp/out.rc' _ "$@"
+  for _ in $(seq 1 240); do [ -f /tmp/out.rc ] && break; sleep 0.5; done
+  return "$(cat /tmp/out.rc 2>/dev/null || echo 99)"
+}
 
 # ------------------------------------------------------------------ ambiente simulado
 setup() {
@@ -154,17 +170,39 @@ check "interrupção na E8: rollback disparado pelo sinal (registrado no log)" g
 check "interrupção na E8: Blue de volta a 80/443" test "$(owner)" = blue
 check "interrupção na E8: ambiente prep restaurado" test "$(mode)" = prep
 
-# 13. sem tmux/screen → recusa (salvo --allow-no-tmux)
-setup
-if env -u TMUX -u STY bash "$R/app/scripts/cutover.sh" --kuma-token-rotated --yes > /tmp/t13.log 2>&1; then
-  bad "sem tmux deveria recusar"
-else
-  ok "sem tmux/screen: cutover recusado"
-fi
-check "sem tmux: nenhuma alteração" test "$(changes)" -eq 0
-check "--allow-no-tmux: plan aceito" env -u TMUX -u STY bash "$R/app/scripts/cutover.sh" --plan --kuma-token-rotated --allow-no-tmux
+# 13. detecção do multiplexer pela árvore de processos
+check "multiplexer_ancestor: encontra o tmux desta suíte" bash -c '. /repo/scripts/lib/common.sh; multiplexer_ancestor | grep -q "^tmux (pid [0-9]*)$"'
+if outside_tmux bash -c '. /repo/scripts/lib/common.sh; multiplexer_ancestor'; then bad "fora do tmux: nenhum multiplexer"; else ok "fora do tmux: nenhum multiplexer"; fi
 
-# 14. rollback --plan não altera nada
+# 14. dentro do tmux, sem TMUX/STY no ambiente (o que o sudo faz) → plan aceito
+setup
+check "tmux sem TMUX/STY no ambiente: plan com 0 pendências" env -u TMUX -u STY $CUT --plan --kuma-token-rotated
+check "tmux: sessão identificada no log" grep -q 'sessão multiplexer: tmux (pid' "$(ls -t $R/logs/cutover-*-plan.log | head -1)"
+
+# 15. sudo real dentro do tmux (sudo remove TMUX; repassa só o ambiente dos stubs)
+setup
+check "sudo remove TMUX do ambiente (premissa)" bash -c '[ -n "${TMUX:-}" ] && ! sudo printenv TMUX >/dev/null'
+check "sudo dentro do tmux: plan com 0 pendências" \
+  sudo env "PATH=$PATH" "STUB_STATE=$STUB_STATE" "WAIT_SECONDS=$WAIT_SECONDS" \
+    "ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP=$ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP" \
+    "ACCESSGATEWAY_TEST_BLUE_AUTHELIA_SHA256=$ACCESSGATEWAY_TEST_BLUE_AUTHELIA_SHA256" \
+    bash "$R/app/scripts/cutover.sh" --plan --kuma-token-rotated
+
+# 16. fora do tmux → recusa, mesmo com TMUX/STY falsificados
+setup
+if outside_tmux env -u TMUX -u STY $CUT --kuma-token-rotated --yes; then bad "fora do tmux deveria recusar"; else ok "fora do tmux: cutover recusado"; fi
+check "fora do tmux: motivo é a verificação do multiplexer" grep -q 'FALHA\] execução dentro do tmux' /tmp/out.log
+check "fora do tmux: nenhuma alteração" test "$(changes)" -eq 0
+if outside_tmux env TMUX=/tmp/tmux-0/default,1,0 STY=1.falso $CUT --kuma-token-rotated --yes; then
+  bad "TMUX/STY falsificados fora do tmux deveriam ser recusados"
+else
+  ok "TMUX/STY falsificados fora do tmux: recusado"
+fi
+check "falsificado: variáveis ignoradas (registrado)" grep -q 'nenhum processo tmux/screen na ancestralidade' /tmp/out.log
+check "falsificado: nenhuma alteração" test "$(changes)" -eq 0
+check "--allow-no-tmux fora do tmux: plan aceito (contingência)" outside_tmux env -u TMUX -u STY $CUT --plan --kuma-token-rotated --allow-no-tmux
+
+# 17. rollback --plan não altera nada
 setup
 before=$(changes)
 check "rollback --cutover --plan" $RB --cutover --plan
