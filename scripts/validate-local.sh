@@ -208,7 +208,7 @@ check_e2e() {
   local tester=(docker run --rm --network container:accessgateway-e2e-caddy -v "$REPO:/repo:ro" -v "$REPO/$TMP/e2e:/e2e"
     -e ALLOW_NON_ROOT=1 -e GATEWAY_CA=/e2e/data/caddy/caddy/pki/authorities/local/root.crt
     -e PANEL_SECRET_FILE=/e2e/client-secret -e OUTHOME_SECRET_FILE=/e2e/client-secret -e JARVIS_SECRET_FILE=/e2e/client-secret
-    -e USERS_FILE=/e2e/data/authelia/users_database.yml -e PASSWORD_FILE=/e2e/green-test-user.password
+    -e USERS_FILE=/e2e/data/authelia/users_database.yml -e SECRETS_DIR=/e2e -e BLUE_HTTPS_PORT=18443 -e API_BASE=
     "$PYTHON_IMAGE" bash -c 'apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq curl openssl >/dev/null 2>&1 && "$@"' _)
   if "${tester[@]}" bash /repo/scripts/oidc-clients-check.sh > "$TMP/oidc.out" 2>&1; then
     ok "oidc-clients-check: $(grep -c '^\[PASS\]' "$TMP/oidc.out") verificações (autorização, PAR, client_credentials, controles negativos)"
@@ -217,27 +217,34 @@ check_e2e() {
   fi
 
   if ALLOW_NON_ROOT=1 AUTHELIA_CONTAINER=accessgateway-e2e-authelia USERS_FILE="$TMP/e2e/data/authelia/users_database.yml" \
-       PASSWORD_FILE="$TMP/e2e/green-test-user.password" bash scripts/green-test-user.sh create > "$TMP/user.out" 2>&1; then
-    ok "green-test-user create (senha aleatória gerada no container, não impressa)"
+       SECRETS_DIR="$TMP/e2e" bash scripts/green-test-user.sh create > "$TMP/user.out" 2>&1; then
+    ok "green-test-user create: home-user e home-admin (senhas aleatórias geradas no container, não impressas)"
   else
     bad "green-test-user create: $(tail -3 "$TMP/user.out")"
   fi
   # No Docker Desktop o inotify do bind mount não é confiável: reinicia o Authelia de TESTE para recarregar o arquivo.
   docker restart accessgateway-e2e-authelia >/dev/null && sleep 5
-  if "${tester[@]}" bash /repo/scripts/green-test-user.sh test > "$TMP/usertest.out" 2>&1; then
-    ok "green-test-user test: $(grep -c '^\[PASS\]' "$TMP/usertest.out") verificações (1º fator, sessão, matriz de autorização, logout)"
+  local name script
+  for name in green-test-user oidc-flow-check session-check; do
+    script="/repo/scripts/$name.sh"; [ "$name" = green-test-user ] && script="$script test"
+    [ "$name" = session-check ] && script="$script --quick"
+    # shellcheck disable=SC2086  # "$script" contém o caminho e o argumento
+    if "${tester[@]}" bash $script > "$TMP/$name.out" 2>&1; then
+      ok "$name: $(grep -c '^\[PASS\]' "$TMP/$name.out") verificações"
+    else
+      bad "$name: $(grep -E '^\[FAIL\]|ERRO' "$TMP/$name.out" | head -6)"
+    fi
+  done
+  cat "$TMP/e2e/green-test-user.password" "$TMP/e2e/green-test-admin.password" > "$TMP/senhas.pat" 2>/dev/null || true
+  if [ -s "$TMP/senhas.pat" ] && grep -qFf "$TMP/senhas.pat" -- "$TMP"/*.out; then
+    bad "senha de usuário de teste apareceu na saída"
   else
-    bad "green-test-user test: $(grep -E '^\[FAIL\]|ERRO' "$TMP/usertest.out" | head -6)"
+    ok "senhas dos usuários de teste ausentes das saídas"
   fi
-  if grep -qf "$TMP/e2e/green-test-user.password" "$TMP"/oidc.out "$TMP"/user.out "$TMP"/usertest.out 2>/dev/null; then
-    bad "senha do usuário de teste apareceu na saída"
-  else
-    ok "senha do usuário de teste ausente das saídas"
-  fi
-  if ALLOW_NON_ROOT=1 USERS_FILE="$TMP/e2e/data/authelia/users_database.yml" PASSWORD_FILE="$TMP/e2e/green-test-user.password" \
+  if ALLOW_NON_ROOT=1 USERS_FILE="$TMP/e2e/data/authelia/users_database.yml" SECRETS_DIR="$TMP/e2e" \
        bash scripts/green-test-user.sh remove > "$TMP/userrm.out" 2>&1 \
-     && ! grep -q 'green-teste' "$TMP/e2e/data/authelia/users_database.yml" && grep -q '^  teste:' "$TMP/e2e/data/authelia/users_database.yml"; then
-    ok "green-test-user remove (demais usuários preservados)"
+     && ! grep -q 'green-' "$TMP/e2e/data/authelia/users_database.yml" && grep -q '^  teste:' "$TMP/e2e/data/authelia/users_database.yml"; then
+    ok "green-test-user remove: os dois usuários removidos, demais preservados"
   else
     bad "green-test-user remove: $(tail -3 "$TMP/userrm.out")"
   fi
