@@ -5,7 +5,7 @@
 # (home-smoke-publish original) gera status.json com as contagens corretas.
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq >/dev/null && apt-get install -y -qq python3 >/dev/null 2>&1
+apt-get update -qq >/dev/null && apt-get install -y -qq python3 openssl >/dev/null 2>&1
 
 PASS=0
 FAIL=0
@@ -195,7 +195,7 @@ echo 'http://127.0.0.1:39001/api/push/TOKEN-FICTICIO?status=up&msg=OK&ping=' > /
 sleep 1
 green_active
 install -m 755 "$SMOKE" /usr/local/sbin/home-smoke-test
-install -m 755 /repo/infra/home-smoke-test/baseline/home-smoke-publish.2026-09-24 /tmp/home-smoke-publish
+install -m 755 /repo/infra/home-smoke-test/home-smoke-publish /tmp/home-smoke-publish   # publicador da T06.3
 check "publish: executa e publica 31/0" bash -c "python3 /tmp/home-smoke-publish | grep -q 'Smoke publicado: 31 PASS / 0 FAIL'"
 check "publish: status.json ok=true, 31/0, com as checagens novas" python3 -c '
 import json; d = json.load(open("/opt/caddy/config/smoke-status/status.json"))
@@ -216,23 +216,111 @@ import json; d = json.load(open("/opt/caddy/config/smoke-status/status.json")); 
 kill "$KUMA_PID" 2>/dev/null || true
 rm -f /etc/home-smoke-test/kuma-push-url
 
-# 15. install.sh: aplica sobre o original ou sobre a versão da T06.1, reverte para a anterior e recusa desconhecidos
+# 15. T06.3: push HTTPS ao Kuma com TLS verificado (cadeia e hostname), timeout, falha HTTP e token mascarado
+PKI=/tmp/kuma-pki; mkdir -p "$PKI"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 7 -subj "/CN=Teste Local Authority - ECC Root" \
+  -keyout "$PKI/ca.key" -out "$PKI/ca.crt" 2>/dev/null
+leaf() { # nome CN SAN emissor(ca|self)
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=$2" -keyout "$PKI/$1.key" -out "$PKI/$1.csr" 2>/dev/null
+  printf 'subjectAltName=DNS:%s\n' "$3" > "$PKI/$1.ext"
+  if [ "$4" = ca ]; then
+    openssl x509 -req -in "$PKI/$1.csr" -CA "$PKI/ca.crt" -CAkey "$PKI/ca.key" -CAcreateserial -days 7 -extfile "$PKI/$1.ext" -out "$PKI/$1.crt" 2>/dev/null
+  else
+    openssl x509 -req -in "$PKI/$1.csr" -signkey "$PKI/$1.key" -days 7 -extfile "$PKI/$1.ext" -out "$PKI/$1.crt" 2>/dev/null
+  fi
+}
+leaf valido kuma.home.test kuma.home.test ca
+leaf outrohost outro.home.test outro.home.test ca
+leaf autoassinado kuma.home.test kuma.home.test self
+mkdir -p /etc/homeautomation/certs && cp "$PKI/ca.crt" /etc/homeautomation/certs/caddy-local-root.crt
+echo '127.0.0.1 kuma.home.test' >> /etc/hosts
+
+cat > /tmp/kuma-srv.py <<'PY'
+import http.server, socket, ssl, sys, time
+mode, port, log = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+if mode == "hang":                       # aceita TCP e nunca responde (timeout)
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", port)); s.listen(5)
+    conns = []
+    while True:
+        c, _ = s.accept(); conns.append(c)
+cert = sys.argv[4]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        open(log, "a").write(self.path + "\n")
+        code, body = (404, b'{"ok":false,"msg":"Monitor not found or not active."}') if mode == "http404" else (200, b'{"ok":true}')
+        self.send_response(code); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", port), H)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(cert + ".crt", cert + ".key")
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+srv.serve_forever()
+PY
+
+TOKEN='TOKEN-FICTICIO-T063'
+push_case() { # modo certificado → executa o publicador novo contra https://kuma.home.test:39443
+  local log=/tmp/kuma-tls.log pid
+  : > "$log"
+  python3 /tmp/kuma-srv.py "$1" 39443 "$log" "$PKI/${2:-valido}" 2>/dev/null & pid=$!
+  for _ in $(seq 1 20); do (exec 3<>/dev/tcp/127.0.0.1/39443) 2>/dev/null && break; sleep 0.2; done
+  echo "https://kuma.home.test:39443/api/push/$TOKEN?status=up&msg=OK&ping=" > /etc/home-smoke-test/kuma-push-url
+  green_active
+  python3 /tmp/home-smoke-publish > /tmp/pub.out 2>&1 || true
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  PUSHES=$(grep -c . "$log" || true)
+}
+mkdir -p /etc/home-smoke-test
+
+push_case tls valido
+check "TLS válido (CA interna, hostname correto): push entregue com status=up" bash -c "[ $PUSHES -eq 1 ] && grep -q 'status=up' /tmp/kuma-tls.log && ! grep -q Aviso /tmp/pub.out"
+push_case tls autoassinado
+check "certificado inválido (autoassinado, fora da CA): push recusado" bash -c "[ $PUSHES -eq 0 ] && grep -q 'Aviso: não foi possível atualizar o Kuma: .*TLS: ' /tmp/pub.out"
+push_case tls outrohost
+check "hostname divergente (CA válida, SAN outro.home.test): push recusado" bash -c "[ $PUSHES -eq 0 ] && grep -qi 'TLS: .*hostname' /tmp/pub.out"
+push_case http404 valido
+check "falha HTTP (404 do Kuma): registrada como HTTP 404" bash -c "grep -q 'Aviso: não foi possível atualizar o Kuma: HTTPError (HTTP 404)' /tmp/pub.out"
+push_case hang
+check "timeout (servidor não responde): registrado como timeout" bash -c "grep -q 'Aviso: não foi possível atualizar o Kuma: .*timeout' /tmp/pub.out"
+check "token nunca impresso em nenhum caso" bash -c "! grep -rq '$TOKEN' /tmp/pub.out /tmp/out.txt"
+echo "file:///etc/passwd?$TOKEN" > /etc/home-smoke-test/kuma-push-url
+green_active; python3 /tmp/home-smoke-publish > /tmp/pub.out 2>&1 || true
+check "esquema não http(s) recusado (sem ler arquivo local)" bash -c "grep -q 'esquema não suportado: file' /tmp/pub.out && ! grep -q '$TOKEN' /tmp/pub.out"
+check "publicação local continua mesmo com push falhando" bash -c "grep -q 'Smoke publicado: 31 PASS / 0 FAIL' /tmp/pub.out"
+check "nenhum TLS desligado no fluxo de push (publicador e backup)" bash -c \
+  "! grep -nE '_create_unverified_context|CERT_NONE|check_hostname *= *False|--insecure|curl .* -k( |$)' /repo/infra/home-smoke-test/home-smoke-publish /repo/infra/home-server-backup/backup-home-server"
+check "backup: push via curl verifica TLS (sem -k; CA interna via --cacert)" bash -c \
+  "grep -q 'tls=(--cacert \"\$KUMA_CACERT\")' /repo/infra/home-server-backup/backup-home-server"
+rm -f /etc/home-smoke-test/kuma-push-url
+
+# 16. install.sh: smoke e publicador; aplica sobre versões conhecidas, reverte por componente e recusa desconhecidos
 I=/repo/infra/home-smoke-test/install.sh
 ORIG=/repo/infra/home-smoke-test/baseline/home-smoke-test.2026-09-24
 T061=/repo/infra/home-smoke-test/baseline/home-smoke-test.t061
+PORIG=/repo/infra/home-smoke-test/baseline/home-smoke-publish.2026-09-24
+PNEW=/repo/infra/home-smoke-test/home-smoke-publish
 D=/usr/local/sbin/home-smoke-test
+P=/usr/local/sbin/home-smoke-publish
 green_active
-install -m 755 "$ORIG" "$D"; rm -f "$D.pre-t061" "$D.prev"
-check "install --check: roda o novo sem instalar" bash -c "bash $I --check | grep -q 'Gateway ativo em 443: Green' && cmp -s $D $ORIG"
-check "install --apply sobre o original: instala e guarda o original" bash -c "bash $I --apply >/dev/null && cmp -s $D $SMOKE && cmp -s $D.pre-t061 $ORIG && cmp -s $D.prev $ORIG"
-check "install --apply repetido: idempotente" bash -c "bash $I --apply | grep -q 'já instalado'"
-check "install --revert: versão anterior (original) restaurada" bash -c "bash $I --revert >/dev/null && cmp -s $D $ORIG"
+install -m 755 "$ORIG" "$D"; install -m 755 "$PORIG" "$P"; rm -f "$D".pre-* "$D.prev" "$P".pre-* "$P.prev"
+check "install --check: roda o smoke novo sem instalar e testa o TLS do push" bash -c "bash $I --check > /tmp/chk.log 2>&1; grep -q 'Gateway ativo em 443: Green' /tmp/chk.log && grep -q 'push: sem URL configurada' /tmp/chk.log && cmp -s $D $ORIG && cmp -s $P $PORIG"
+echo "https://kuma.home.test:39443/api/push/$TOKEN" > /etc/home-smoke-test/kuma-push-url
+python3 /tmp/kuma-srv.py tls 39443 /tmp/kuma-tls.log "$PKI/valido" 2>/dev/null & SRV=$!; sleep 1
+check "install --check: handshake TLS verificado sem enviar o token" bash -c ": > /tmp/kuma-tls.log; bash $I --check > /tmp/chk.log 2>&1; grep -q 'push: https://kuma.home.test:39443 TLS verificado' /tmp/chk.log && [ ! -s /tmp/kuma-tls.log ] && ! grep -q '$TOKEN' /tmp/chk.log"
+kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null || true
+python3 /tmp/kuma-srv.py tls 39443 /tmp/kuma-tls.log "$PKI/outrohost" 2>/dev/null & SRV=$!; sleep 1
+check "install --check: hostname divergente reprovado" bash -c "bash $I --check | grep -q 'TLS REPROVADO'"
+kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null || true
+rm -f /etc/home-smoke-test/kuma-push-url
+check "install --apply sobre os originais: instala os dois e guarda os originais" bash -c "bash $I --apply >/dev/null && cmp -s $D $SMOKE && cmp -s $P $PNEW && cmp -s $D.pre-t061 $ORIG && cmp -s $P.pre-t063 $PORIG && cmp -s $P.prev $PORIG"
+check "install --apply repetido: idempotente" bash -c "bash $I --apply | grep -q 'publish: já instalado'"
+check "install --revert publish: publicador original restaurado (smoke intacto)" bash -c "bash $I --revert publish >/dev/null && cmp -s $P $PORIG && cmp -s $D $SMOKE"
 install -m 755 "$T061" "$D"
-check "install --apply sobre a T06.1: instala e guarda a T06.1 como anterior" bash -c "bash $I --apply >/dev/null && cmp -s $D $SMOKE && cmp -s $D.prev $T061 && cmp -s $D.pre-t061 $ORIG"
-check "install --revert: T06.1 restaurada" bash -c "bash $I --revert >/dev/null && cmp -s $D $T061"
-echo '# alterado à mão' >> "$D"
-if bash "$I" --apply > /tmp/inst.log 2>&1; then bad "install --apply sobre script desconhecido deveria recusar"; else ok "install --apply: recusa script desconhecido"; fi
-check "install recusado: nada alterado" grep -q '# alterado à mão' "$D"
+check "install --apply com smoke da T06.1: guarda a T06.1 como anterior" bash -c "bash $I --apply >/dev/null && cmp -s $D $SMOKE && cmp -s $D.prev $T061 && cmp -s $P $PNEW"
+check "install --revert smoke: T06.1 restaurada" bash -c "bash $I --revert smoke >/dev/null && cmp -s $D $T061"
+check "install --revert sem componente: recusado" bash -c "! bash $I --revert >/dev/null 2>&1"
+echo '# alterado à mão' >> "$P"
+cp "$D" /tmp/smoke-before
+if bash "$I" --apply > /tmp/inst.log 2>&1; then bad "install --apply sobre publicador desconhecido deveria recusar"; else ok "install --apply: recusa publicador desconhecido"; fi
+check "install recusado: nada alterado (nem o smoke)" bash -c "grep -q '# alterado à mão' $P && cmp -s $D /tmp/smoke-before"
 
 printf '\nRESULTADO: %d PASS, %d FAIL\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

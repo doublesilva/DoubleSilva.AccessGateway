@@ -44,7 +44,6 @@ CERT_CMD=${CERT_CMD:-"$HERE/cert-check.sh --port 443"}
 OIDC_CMD=${OIDC_CMD:-"env GATEWAY_HTTPS_PORT=443 $HERE/oidc-clients-check.sh"}
 TOKEN_CMD=${TOKEN_CMD:-"$HERE/token-interop-check.sh --green-https 443"}
 ROLLBACK_CMD=${ROLLBACK_CMD:-"$HERE/rollback.sh --cutover --yes"}
-SMOKE_CMD=${SMOKE_CMD:-/usr/local/sbin/home-smoke-test}
 BACKUP_UNIT=home-server-backup.service
 WAIT_SECONDS=${WAIT_SECONDS:-60}
 
@@ -246,11 +245,16 @@ fi
 
 disarm_signal_rollback
 log "== E11 smoke test do servidor =="
-smoke=$($SMOKE_CMD 2>&1 || true)
-fails=$(grep -c '\[FAIL\]' <<<"$smoke" || true)
-unexpected=$(grep '\[FAIL\]' <<<"$smoke" | grep -vE "$SMOKE_KNOWN_FAILS" || true)
-log "  smoke: $(grep -c '\[PASS\]' <<<"$smoke" || true) PASS, $fails FAIL (esperadas: as 3 do baseline)"
-[ -z "$unexpected" ] || { log "  falhas inesperadas:"; sed 's/^/    /' <<<"$unexpected"; warn "avalie antes de encerrar a janela"; }
+smoke_run   # sem falhas toleradas (T06.3)
+SMOKE_RESULT=ok
+if smoke_ok; then
+  log "[OK]   smoke: $SMOKE_PASS PASS, 0 FAIL"
+else
+  SMOKE_RESULT=reprovado
+  log "[FALHA] smoke: $SMOKE_PASS PASS, $SMOKE_FAIL FAIL, saída $SMOKE_RC; falhas inesperadas:"
+  grep '^\[FAIL\]' <<<"$SMOKE_OUT" | sed 's/^/    /' || true
+  warn "smoke reprovado: avalie antes de encerrar a janela (rollback se atribuível ao gateway)"
+fi
 
 log "== Cutover concluído =="
 cat <<EOF
@@ -259,3 +263,7 @@ cat <<EOF
   Rollback: sudo $HERE/rollback.sh --cutover --yes
   Log: $LOG
 EOF
+if [ "$SMOKE_RESULT" != ok ]; then
+  log "ATENÇÃO: Green em produção, mas o smoke da E11 foi reprovado (saída 3). Avalie as falhas acima."
+  exit 3
+fi

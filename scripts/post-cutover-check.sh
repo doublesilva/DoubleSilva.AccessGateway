@@ -46,9 +46,13 @@ docker ps --format '{{.Names}}' | grep -vE "^($GREEN_CADDY|$GREEN_AUTHELIA)$" | 
   r=$(docker inspect "$c" --format '{{.RestartCount}} {{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}')
   printf '  %-28s restarts=%s health=%s\n' "$c" "${r%% *}" "${r#* }"
 done
-smoke=$(/usr/local/sbin/home-smoke-test 2>&1 || true)
-unexpected=$(grep '\[FAIL\]' <<<"$smoke" | grep -vE "$SMOKE_KNOWN_FAILS" || true)
-[ -z "$unexpected" ] && ok "smoke: $(grep -c '\[PASS\]' <<<"$smoke") PASS; só falhas conhecidas" || { bad "smoke com falhas inesperadas"; echo "$unexpected"; }
+smoke_run   # sem falhas toleradas (T06.3)
+if smoke_ok; then
+  ok "smoke: $SMOKE_PASS PASS, 0 FAIL"
+else
+  bad "smoke reprovado: $SMOKE_PASS PASS, $SMOKE_FAIL FAIL, saída $SMOKE_RC"
+  grep '^\[FAIL\]' <<<"$SMOKE_OUT" | sed 's/^/    /' || true
+fi
 
 printf '\nRESULTADO: %d PASS, %d FAIL\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

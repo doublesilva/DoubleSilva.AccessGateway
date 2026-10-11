@@ -66,7 +66,7 @@ setup() {
 
   export SNAPSHOT_CMD="echo snapshot-simulado" VALIDATE_CMD=true CERT_CMD=true OIDC_CMD=true TOKEN_CMD=true
   export SMOKE_CMD=/tmp/smoke.sh
-  printf '#!/bin/sh\necho "[PASS] casa.home pela LAN"\necho "[FAIL] API health pela LAN (HTTP 404)"\necho "[FAIL] Blazor negotiate via Tailscale (HTTP 301)"\n' > /tmp/smoke.sh
+  printf '#!/bin/sh\necho "[PASS] casa.home pela LAN"\necho "[PASS] Gateway ativo em 443: Green (accessgateway-caddy)"\nexit 0\n' > /tmp/smoke.sh
   chmod +x /tmp/smoke.sh
   unset FAIL_GREEN_HTTP FAIL_AUTHELIA BACKUP_ACTIVE
 }
@@ -202,13 +202,31 @@ check "falsificado: variáveis ignoradas (registrado)" grep -q 'nenhum processo 
 check "falsificado: nenhuma alteração" test "$(changes)" -eq 0
 check "--allow-no-tmux fora do tmux: plan aceito (contingência)" outside_tmux env -u TMUX -u STY $CUT --plan --kuma-token-rotated --allow-no-tmux
 
-# 17. E11: só as falhas do baseline são conhecidas; "Caddyfile inválido" do gateway ativo não é mascarado
-check "E11 (cutover completo do caso 5): smoke só com falhas do baseline" bash -c "! grep -q 'falhas inesperadas' /tmp/t5.log"
+# 17. smoke sem falhas toleradas (T06.3)
+check "E11 (cutover completo do caso 5): smoke aprovado" grep -q '\[OK\]   smoke: 2 PASS, 0 FAIL' /tmp/t5.log
+check "nenhum consumidor usa SMOKE_KNOWN_FAILS" bash -c "! grep -rn SMOKE_KNOWN_FAILS /repo/scripts"
+smoke_case() { # rótulo esperado(ok|falha) conteúdo-do-script
+  printf '#!/bin/sh\n%b' "$3" > /tmp/smoke.sh; chmod +x /tmp/smoke.sh
+  if bash -c '. /repo/scripts/lib/common.sh; smoke_run; smoke_ok'; then r=ok; else r=falha; fi
+  check "smoke_ok: $1 → $2" test "$r" = "$2"
+}
+smoke_case "só PASS, saída 0" ok 'echo "[PASS] a"\necho "[PASS] b"\nexit 0\n'
+smoke_case "falha antiga 'API health pela LAN (HTTP 404)'" falha 'echo "[PASS] a"\necho "[FAIL] API health pela LAN (HTTP 404)"\nexit 1\n'
+smoke_case "falha antiga 'Blazor negotiate via Tailscale (HTTP 301)'" falha 'echo "[PASS] a"\necho "[FAIL] Blazor negotiate via Tailscale (HTTP 301)"\nexit 1\n'
+smoke_case "[FAIL] com cores ANSI" falha 'printf "\\033[0;31m[FAIL]\\033[0m x\\n"\necho "[PASS] a"\nexit 1\n'
+smoke_case "saída 1 sem nenhuma linha [FAIL]" falha 'echo "[PASS] a"\nexit 1\n'
+smoke_case "nenhuma checagem executada" falha 'exit 0\n'
+SMOKE_CMD=/nao/existe bash -c '. /repo/scripts/lib/common.sh; smoke_run; ! smoke_ok' && ok "smoke_ok: script ausente → falha" || bad "smoke_ok: script ausente → falha"
 setup
-printf '#!/bin/sh\necho "[FAIL] API health pela LAN (HTTP 404)"\necho "[FAIL] Caddyfile inválido (accessgateway-caddy)"\n' > /tmp/smoke.sh
-$CUT --kuma-token-rotated --yes > /tmp/t17.log 2>&1 || true
-check "E11: Caddyfile inválido da Green reportado como falha inesperada" grep -q 'Caddyfile inválido (accessgateway-caddy)' /tmp/t17.log
-check "E11: falha inesperada sinalizada" grep -q 'falhas inesperadas' /tmp/t17.log
+printf '#!/bin/sh\necho "[PASS] a"\necho "[FAIL] API health pela LAN (HTTP 404)"\nexit 1\n' > /tmp/smoke.sh
+$CUT --kuma-token-rotated --yes > /tmp/t17.log 2>&1 && rc=0 || rc=$?
+check "E11: falha antiga do baseline agora reprova o smoke (saída 3, rc=$rc)" test "$rc" -eq 3
+check "E11: falha listada e sinalizada" bash -c "grep -q 'FALHA\] smoke: 1 PASS, 1 FAIL' /tmp/t17.log && grep -q 'API health pela LAN (HTTP 404)' /tmp/t17.log"
+check "E11: smoke reprovado não dispara rollback (Green segue dona)" test "$(owner)" = green
+setup
+printf '#!/bin/sh\necho "[FAIL] Caddyfile inválido (accessgateway-caddy)"\nexit 1\n' > /tmp/smoke.sh
+$CUT --kuma-token-rotated --yes > /tmp/t17b.log 2>&1 && rc=0 || rc=$?
+check "E11: Caddyfile inválido da Green reprova (saída 3)" bash -c "[ $rc -eq 3 ] && grep -q 'Caddyfile inválido (accessgateway-caddy)' /tmp/t17b.log"
 
 # 18. rollback --plan não altera nada
 setup

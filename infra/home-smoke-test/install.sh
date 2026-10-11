@@ -1,56 +1,129 @@
 #!/usr/bin/env bash
-# Implantação isolada do home-smoke-test (T06.1/T06.2; somente monitoramento; nenhum serviço é reiniciado).
+# Implantação isolada do monitoramento do home-server: home-smoke-test (T06.1/T06.2) e home-smoke-publish (T06.3).
+# Somente monitoramento: nenhum serviço é reiniciado; o timer não é alterado (a próxima execução usa os novos).
 #
-#   install.sh --check     executa o smoke NOVO a partir da release, sem instalar (somente leitura)
-#   install.sh --apply     guarda a versão instalada em home-smoke-test.prev (e o original de 24/09 em
-#                          home-smoke-test.pre-t061) e instala o novo (troca atômica)
-#   install.sh --revert    restaura a versão anterior (home-smoke-test.prev)
+#   install.sh --check              executa o smoke NOVO (sem instalar) e testa o TLS do push ao Kuma com o publicador
+#                                   novo, só com handshake (nenhuma requisição, o token não é enviado nem impresso)
+#   install.sh --apply              instala os dois (troca atômica); a versão substituída de cada um vai para <arquivo>.prev
+#                                   (os originais de 24/09 ficam em home-smoke-test.pre-t061 e home-smoke-publish.pre-t063)
+#   install.sh --revert smoke|publish   restaura a versão anterior (<arquivo>.prev) de um componente
 #
-# O home-smoke-publish e o timer não são alterados: a próxima execução do timer (≤ 5 min) já usa o novo script.
-# Recusa instalar sobre um home-smoke-test desconhecido (sha256 fora das versões conhecidas abaixo).
+# Recusa instalar sobre versões desconhecidas (sha256 fora das listas abaixo); nada é alterado nesse caso.
 set -Eeuo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SRC="$HERE/home-smoke-test"
-DST=/usr/local/sbin/home-smoke-test
-ORIG_BAK=$DST.pre-t061
-PREV=$DST.prev
-ORIGINAL_SHA256=c37811708069212fffb9b39892f4c6e4bc922cec3aa4bc5f703fcf79e526716e # gitleaks:allow (hash do script original, 24/09)
-T061_SHA256=9cc4c6ae5d97a2b9baf010ae60bbc7f06c7ec3f694f6c1d0596e4ee55bb8b7b4     # gitleaks:allow (hash da versão da T06.1)
+SBIN=/usr/local/sbin
+
+# gitleaks:allow (hashes públicos dos scripts)
+SMOKE_KNOWN="c37811708069212fffb9b39892f4c6e4bc922cec3aa4bc5f703fcf79e526716e 9cc4c6ae5d97a2b9baf010ae60bbc7f06c7ec3f694f6c1d0596e4ee55bb8b7b4 90563aedfe7ea8934a841697418985628e40b696e0ed0c9b52169e2f3af134bd" # gitleaks:allow
+PUBLISH_KNOWN="c182cc551898bd6b7e6e5f4ee335684eec1a02dc6689ab0159db6edd9c2f29a8" # gitleaks:allow
+SMOKE_ORIG=c37811708069212fffb9b39892f4c6e4bc922cec3aa4bc5f703fcf79e526716e   # gitleaks:allow
+PUBLISH_ORIG=c182cc551898bd6b7e6e5f4ee335684eec1a02dc6689ab0159db6edd9c2f29a8 # gitleaks:allow
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { printf '[%s] ERRO: %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
 sha() { sha256sum "$1" | cut -d' ' -f1; }
-known() { case "$1" in "$ORIGINAL_SHA256"|"$T061_SHA256") return 0 ;; *) return 1 ;; esac; }
 summary() { sed 's/\x1b\[[0-9;]*m//g' | grep -E '^\[(FAIL|INFO)\]|^ (PASS|FAIL):|Gateway ativo'; }
-swap_in() { install -m 755 -o root -g root "$1" "$DST.new" && mv -f "$DST.new" "$DST"; }
+in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# componente → origem, destino, versões conhecidas, original e nome da cópia do original
+spec() {
+  case "$1" in
+    smoke)   echo "$HERE/home-smoke-test $SBIN/home-smoke-test $SMOKE_ORIG pre-t061" ;;
+    publish) echo "$HERE/home-smoke-publish $SBIN/home-smoke-publish $PUBLISH_ORIG pre-t063" ;;
+    *) die "componente inválido: $1 (smoke|publish)" ;;
+  esac
+}
+known_list() { [ "$1" = smoke ] && echo "$SMOKE_KNOWN" || echo "$PUBLISH_KNOWN"; }
+
+# Estado de um componente: "instalado" (= novo), "conhecido" ou "desconhecido"
+state() {
+  local src dst orig tag cur
+  read -r src dst orig tag <<<"$(spec "$1")"
+  cur=$(sha "$dst")
+  if [ "$cur" = "$(sha "$src")" ]; then echo instalado
+  elif in_list "$cur" "$(known_list "$1")"; then echo conhecido
+  else echo desconhecido; fi
+}
+
+install_one() {
+  local src dst orig tag cur
+  read -r src dst orig tag <<<"$(spec "$1")"
+  cur=$(sha "$dst")
+  if [ "$cur" = "$orig" ] && [ ! -e "$dst.$tag" ]; then cp -p "$dst" "$dst.$tag"; fi
+  cp -p "$dst" "$dst.prev"
+  [ "$(sha "$dst.prev")" = "$cur" ] || die "cópia de segurança $dst.prev não confere"
+  install -m 755 -o root -g root "$src" "$dst.new" && mv -f "$dst.new" "$dst"
+  log "$1: instalado $dst (sha256 $(sha "$dst" | cut -c1-12)…); anterior em $dst.prev (${cur:0:12}…)"
+}
+
+# Handshake TLS com o host do push usando o contexto do publicador novo. Imprime só esquema, host e resultado.
+tls_probe() {
+  python3 - "$HERE/home-smoke-publish" <<'PY'
+import socket, ssl, sys
+from pathlib import Path
+from urllib.parse import urlsplit
+ns = {}
+src = Path(sys.argv[1]).read_text(encoding="utf-8")
+# Carrega só as definições (até o primeiro bloco executável), sem rodar o smoke nem publicar.
+exec(compile(src.split("\n# Remove códigos ANSI", 1)[0], "home-smoke-publish", "exec"), ns)
+f = ns["KUMA_URL_FILE"]
+if not f.exists():
+    print("push: sem URL configurada"); sys.exit(0)
+p = urlsplit(f.read_text(encoding="utf-8").strip())
+if p.scheme == "http":
+    print(f"push: http://{p.hostname}:{p.port or 80} (sem TLS; nada a verificar)"); sys.exit(0)
+if p.scheme != "https":
+    print(f"push: esquema não suportado ({p.scheme or 'vazio'})"); sys.exit(1)
+ctx = ns["kuma_tls_context"]()
+try:
+    with socket.create_connection((p.hostname, p.port or 443), timeout=5) as s:
+        with ctx.wrap_socket(s, server_hostname=p.hostname) as t:
+            issuer = dict(x[0] for x in t.getpeercert()["issuer"]).get("commonName", "?")
+    print(f"push: https://{p.hostname}:{p.port or 443} TLS verificado (cadeia e hostname; emissor: {issuer})")
+except ssl.SSLCertVerificationError as e:
+    print(f"push: https://{p.hostname}:{p.port or 443} TLS REPROVADO ({e.verify_message})"); sys.exit(1)
+except OSError as e:
+    print(f"push: https://{p.hostname}:{p.port or 443} sem conexão ({type(e).__name__})"); sys.exit(1)
+PY
+}
 
 [ "$(id -u)" -eq 0 ] || die "execute como root (sudo)."
-[ -s "$SRC" ] && bash -n "$SRC" || die "script novo ausente ou com erro de sintaxe: $SRC"
+for c in smoke publish; do
+  read -r src _ <<<"$(spec "$c")"
+  [ -s "$src" ] || die "script novo ausente: $src"
+done
+bash -n "$HERE/home-smoke-test" || die "home-smoke-test com erro de sintaxe"
+python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$HERE/home-smoke-publish" \
+  || die "home-smoke-publish com erro de sintaxe"
 
 case "${1:-}" in
   --check)
-    log "Smoke novo (sem instalar), a partir de $SRC:"
-    bash "$SRC" 2>&1 | summary || true
-    log "Instalado hoje: $DST (sha256 $(sha "$DST" | cut -c1-12)…)"
+    log "Smoke novo (sem instalar):"
+    bash "$HERE/home-smoke-test" 2>&1 | summary || true
+    log "TLS do push ao Kuma com o publicador novo (sem enviar requisição):"
+    tls_probe || true
+    for c in smoke publish; do
+      read -r _ dst _ <<<"$(spec "$c")"
+      log "$c instalado hoje: $dst (sha256 $(sha "$dst" | cut -c1-12)…; $(state "$c"))"
+    done
     ;;
   --apply)
-    cur=$(sha "$DST")
-    if [ "$cur" = "$(sha "$SRC")" ]; then log "já instalado (sha256 ${cur:0:12}…)"; exit 0; fi
-    known "$cur" || die "$DST não é uma versão conhecida (${cur:0:12}…); nada alterado"
-    if [ "$cur" = "$ORIGINAL_SHA256" ] && [ ! -e "$ORIG_BAK" ]; then cp -p "$DST" "$ORIG_BAK"; fi
-    cp -p "$DST" "$PREV"
-    [ "$(sha "$PREV")" = "$cur" ] || die "cópia de segurança $PREV não confere; nada alterado"
-    swap_in "$SRC"
-    log "instalado: $DST (sha256 $(sha "$DST" | cut -c1-12)…); anterior em $PREV (${cur:0:12}…)"
-    log "Execução de conferência:"
-    "$DST" 2>&1 | summary || true
-    log "O timer home-smoke-publish usa o novo script na próxima execução (≤ 5 min)."
+    for c in smoke publish; do
+      [ "$(state "$c")" != desconhecido ] || die "$c: versão instalada desconhecida; nada alterado"
+    done
+    for c in smoke publish; do
+      if [ "$(state "$c")" = instalado ]; then log "$c: já instalado"; else install_one "$c"; fi
+    done
+    log "Conferência do smoke:"
+    "$SBIN/home-smoke-test" 2>&1 | summary || true
+    log "O timer home-smoke-publish usa os novos scripts na próxima execução (≤ 5 min)."
     ;;
   --revert)
-    [ -e "$PREV" ] || die "sem versão anterior em $PREV"
-    known "$(sha "$PREV")" || die "versão anterior $PREV não confere com as conhecidas"
-    swap_in "$PREV"
-    log "versão anterior restaurada em $DST (sha256 $(sha "$DST" | cut -c1-12)…)"
+    read -r _ dst _ <<<"$(spec "${2:-}")"
+    [ -e "$dst.prev" ] || die "sem versão anterior em $dst.prev"
+    in_list "$(sha "$dst.prev")" "$(known_list "$2") $(sha "$HERE/$(basename "$dst")")" || die "$dst.prev não é uma versão conhecida"
+    install -m 755 -o root -g root "$dst.prev" "$dst.new" && mv -f "$dst.new" "$dst"
+    log "$2: versão anterior restaurada em $dst (sha256 $(sha "$dst" | cut -c1-12)…)"
     ;;
-  *) die "uso: install.sh --check | --apply | --revert" ;;
+  *) die "uso: install.sh --check | --apply | --revert smoke|publish" ;;
 esac
