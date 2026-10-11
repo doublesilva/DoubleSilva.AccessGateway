@@ -43,6 +43,9 @@ admin.home.doublesilva.com {
 
 	import authelia
 
+	# Dashboard do smoke test em /status/ (T06.4, somente Green)
+	import status_dashboard
+
 	# Central administrativa (página estática) + API do Netdata
 	import netdata_dashboard
 }

@@ -13,7 +13,7 @@
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks).
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -57,8 +57,10 @@ check_caddy() {
   docker run --rm --network none -v "$REPO/tests/baseline:/b:ro" "$CADDY_IMAGE" \
     caddy adapt --config /b/blue.Caddyfile --adapter caddyfile > "$TMP/blue.json" 2>/dev/null
 
-  if py tests/tools/caddy_parity.py "$TMP/blue.json" "$TMP/green-prod.json"; then
-    ok "paridade de rotas Blue == Green (produção)"
+  # Única divergência permitida: o dashboard do smoke (T06.4), exclusivo da Green.
+  if py tests/tools/caddy_parity.py "$TMP/blue.json" "$TMP/green-prod.json" \
+       --green-only admin.home.doublesilva.com:/status --green-only 'admin.home.doublesilva.com:/status/*'; then
+    ok "paridade de rotas Blue == Green (produção; exceto /status do admin, T06.4)"
   else
     bad "paridade de rotas Blue x Green"
   fi
@@ -168,6 +170,10 @@ check_e2e() {
   cp -r "$TMP/secrets" "$TMP/e2e/secrets/authelia"
   cp "$TMP/data/users_database.yml" "$TMP/e2e/data/authelia/"
   echo '<html>netdata</html>' > "$TMP/e2e/static/netdata-dashboard/index.html"
+  # Dashboard do smoke (T06.4): o que accessgateway-status-sync copiaria
+  mkdir -p "$TMP/e2e/static/netdata-dashboard/status"
+  echo '{"ok": true, "passed": 31, "failed": 0, "checks": []}' > "$TMP/e2e/static/netdata-dashboard/status/status.json"
+  echo '<html><title>Home Server - Smoke Test</title></html>' > "$TMP/e2e/static/netdata-dashboard/status/index.html"
   local null_out=/dev/null
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) curl_tls+=(--ssl-no-revoke); null_out=NUL ;; esac
 
@@ -198,6 +204,15 @@ check_e2e() {
   [ "$r" = '"issuer":"https://auth.home.doublesilva.com"' ] && ok "issuer OIDC = https://auth.home.doublesilva.com" || bad "issuer: ${r:-<vazio>}"
   r=$(e2e_req kuma.home.doublesilva.com /)
   [[ "$r" = "302 https://auth.home.doublesilva.com/?rd="* ]] && ok "forward_auth: 302 para o portal sem sessão" || bad "forward_auth: $r"
+  local p all=1
+  for p in /status /status/ /status/status.json /status/index.html; do
+    r=$(e2e_req admin.home.doublesilva.com "$p")
+    [[ "$r" = "302 https://auth.home.doublesilva.com/?rd="* ]] || { all=0; bad "dashboard $p sem sessão: $r"; }
+  done
+  [ "$all" = 1 ] && ok "dashboard /status* sem sessão: 302 para o portal (nada exposto sem autenticação)"
+  r=$(curl -sS -o "$null_out" --max-time 10 --connect-to admin.home.doublesilva.com:443:127.0.0.1:18443 \
+    -w '%{http_code}' https://admin.home.doublesilva.com/status/ 2>/dev/null || echo 000)
+  [[ "$r" = 000* ]] && ok "dashboard: TLS recusado sem a CA interna (certificado validado)" || bad "dashboard sem CA: $r"
   r=$(e2e_req panel.home.doublesilva.com /stream/x)
   [[ "$r" != *"auth.home.doublesilva.com"* ]] && ok "panel /stream/* sem forward_auth (${r%% *}: upstream ausente no teste)" || bad "panel /stream: $r"
   r=$(e2e_req panel.home /a?b=1)
@@ -270,11 +285,22 @@ check_smoke() {
   fi
 }
 
+check_status() {
+  step "Dashboard do smoke (T06.4: sincronização e reload do Caddy; docker simulado)"
+  if docker run --rm -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/status-dashboard/status-dashboard-test.sh > "$TMP/status.out" 2>&1; then
+    ok "status-dashboard: $(tail -1 "$TMP/status.out")"
+  else
+    bad "status-dashboard: $(grep -E '^\[FAIL\]' "$TMP/status.out" | head -8)"
+  fi
+}
+
 check_lint() {
   step "Lint e segredos"
   if docker run --rm --network none -v "$REPO:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
       -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh \
       tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh \
+      tests/status-dashboard/*.sh tests/status-dashboard/stubs/* \
+      infra/accessgateway-status-sync/accessgateway-status-sync infra/accessgateway-status-sync/install.sh \
       infra/home-server-backup/backup-home-server infra/home-server-backup/tests/*.sh \
       > "$TMP/shellcheck.out" 2>&1; then
     ok "shellcheck (scripts, infra e testes)"
@@ -295,7 +321,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status lint}"; do
   for s in $section; do "check_$s"; done
 done
 

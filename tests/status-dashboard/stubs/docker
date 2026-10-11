@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Stub do docker para tests/status-dashboard (caddy-reload.sh). Estado em $RS:
+#   running.json (config em execução), installed.json (caddy adapt do Caddyfile instalado), started (StartedAt RestartCount)
+#   invalid (caddy validate falha), reload_fail (caddy reload falha), restart_on_reload (reload "reinicia" o container)
+S=${RS:?}
+echo "docker $*" >> "$S/calls.log"
+case "$1" in
+  inspect)
+    case "$*" in
+      *StartedAt*) cat "$S/started" ;;
+      *State.Running*) [ "${*: -1}" = caddy ] && echo false || echo true ;;   # Blue parada
+      *Config.Env*) echo "GATEWAY_HTTPS_PORT=443" ;;
+    esac ;;
+  exec)
+    shift; [ "$1" = -i ] && shift; shift   # container
+    case "$*" in
+      "wget -qO- http://localhost:2020/config/") cat "$S/running.json" ;;
+      "caddy validate"*) [ ! -e "$S/invalid" ] || { echo "Error: adapting config: syntax" >&2; exit 1; }; echo "Valid configuration" ;;
+      "caddy adapt"*) cat "$S/installed.json" ;;
+      "caddy reload"*"--address localhost:2020")
+        [ ! -e "$S/reload_fail" ] || { echo "Error: loading config" >&2; exit 1; }
+        cp "$S/installed.json" "$S/running.json"
+        [ ! -e "$S/restart_on_reload" ] || echo "2026-10-11T18:00:00Z 1" > "$S/started" ;;
+      *"--post-file=/dev/stdin http://localhost:2020/load") cat > "$S/running.json" ;;
+      *) echo "stub docker exec: não suportado: $*" >&2; exit 2 ;;
+    esac ;;
+  *) echo "stub docker: não suportado: $*" >&2; exit 2 ;;
+esac

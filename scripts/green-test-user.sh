@@ -152,6 +152,27 @@ test_profile() { # usuário grupo arquivo
     fi
   done
 
+  # Dashboard do smoke (T06.4): admin.home.doublesilva.com/status/ só para home-admin
+  local st=https://admin.home.doublesilva.com/status
+  if [ "$group" = home-admin ]; then
+    res=$(c admin.home.doublesilva.com -b "$jar" -D - -o "${TMPDIR:-/tmp}/status.$$" -w '%{http_code}' "$st/status.json" | tr -d '\r' || echo 000)
+    if [ "$(tail -1 <<<"$res")" = 200 ] && grep -qi '^cache-control: no-store' <<<"$res" && grep -q '"passed"' "${TMPDIR:-/tmp}/status.$$"; then
+      ok "$user: dashboard $st/status.json 200 (JSON do smoke, sem cache)"
+    else
+      bad "$user: dashboard status.json: $(tail -1 <<<"$res")"
+    fi
+    res=$(c admin.home.doublesilva.com -b "$jar" -o "${TMPDIR:-/tmp}/status.$$" -w '%{http_code}' "$st/" || echo 000)
+    [ "$res" = 200 ] && grep -q 'Smoke Test' "${TMPDIR:-/tmp}/status.$$" && ok "$user: dashboard $st/ 200 (index.html)" || bad "$user: dashboard $st/: $res"
+    res=$(c admin.home.doublesilva.com -b "$jar" -o "$NULL" -w '%{http_code} %{redirect_url}' "$st" || echo 000)
+    [ "$res" = "308 $st/" ] && ok "$user: $st → 308 $st/" || bad "$user: $st: $res"
+    res=$(c admin.home.doublesilva.com -b "$jar" -o "$NULL" -w '%{http_code}' "$st/../status/naoexiste.txt" || echo 000)
+    [ "$res" = 404 ] && ok "$user: arquivo inexistente no dashboard 404 (sem listagem/fallback)" || bad "$user: dashboard inexistente: $res"
+    rm -f "${TMPDIR:-/tmp}/status.$$"
+  else
+    res=$(c admin.home.doublesilva.com -b "$jar" -o "$NULL" -w '%{http_code}' "$st/status.json" || echo 000)
+    [ "$res" = 403 ] && ok "$user NEGADO no dashboard $st/status.json (403)" || bad "$user deveria receber 403 no dashboard: $res"
+  fi
+
   code=$(c auth.home.doublesilva.com -b "$jar" -o "$NULL" -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{}' "$AUTH/api/logout" || echo 000)
   [ "$code" = 200 ] && ok "$user: logout" || bad "$user: logout $code"
   res=$(c kuma.home.doublesilva.com -b "$jar" -o "$NULL" -w '%{http_code} %{redirect_url}' "https://kuma.home.doublesilva.com/" || echo 000)

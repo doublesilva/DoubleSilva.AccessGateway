@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Copia o dashboard do smoke test para o diretório servido pela Green (T06.4).
+#   origem:  /opt/caddy/config/smoke-status/{status.json,index.html}   (gerados por home-smoke-publish; não alterado)
+#   destino: /srv/accessgateway/static/netdata-dashboard/status/        (montado SOMENTE LEITURA no accessgateway-caddy
+#            em /config/netdata-dashboard; publicado em https://admin.home.doublesilva.com/status/, só home-admin)
+# Acionado por accessgateway-status-sync.path a cada nova publicação. Cópia atômica (arquivo temporário + rename);
+# um status.json inválido não substitui a cópia anterior; o destino contém somente os dois arquivos.
+set -Eeuo pipefail
+SRC=${STATUS_SRC:-/opt/caddy/config/smoke-status}
+DST=${STATUS_DST:-/srv/accessgateway/static/netdata-dashboard/status}
+FILES=(status.json index.html)
+
+die() { echo "accessgateway-status-sync: $*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "execute como root"
+[ -d "$(dirname "$DST")" ] || die "diretório pai do destino ausente: $(dirname "$DST")"
+for f in "${FILES[@]}"; do
+  [ -f "$SRC/$f" ] && [ ! -L "$SRC/$f" ] || die "origem ausente ou link simbólico: $SRC/$f"
+done
+python3 - "$SRC/status.json" <<'PY' || die "status.json inválido; cópia anterior mantida"
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert isinstance(d, dict) and {"ok", "passed", "failed", "checks"} <= set(d)
+assert isinstance(d["checks"], list)
+PY
+
+umask 022
+install -d -m 755 -o root -g root "$DST"
+# index.html por último: a página lida pelo navegador nunca fica mais nova que o JSON
+for f in status.json index.html; do
+  install -m 644 -o root -g root "$SRC/$f" "$DST/.$f.tmp"
+  mv -f "$DST/.$f.tmp" "$DST/$f"
+done
+find "$DST" -mindepth 1 \( ! -name status.json ! -name index.html \) -exec rm -rf {} +
+summary=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("%s PASS / %s FAIL, gerado em %s" % (d["passed"], d["failed"], d.get("generatedAt", "?")))' "$DST/status.json")
+echo "accessgateway-status-sync: copiado ($summary)"
