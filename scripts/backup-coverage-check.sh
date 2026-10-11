@@ -14,11 +14,16 @@ SNAP=latest
 
 ls "$BACKUP_MOUNT/" >/dev/null 2>&1 || true   # dispara o automount
 R() { restic --repo "$RESTIC_REPOSITORY" --password-file "$RESTIC_PASSWORD_FILE" "$@"; }
-info=$(R snapshots --tag "$BACKUP_TAG" --latest 1 --compact | sed -n '3p')
-[ -n "$info" ] || { echo "nenhum snapshot com a tag $BACKUP_TAG" >&2; exit 1; }
+# "--latest 1" é por grupo (host + caminhos): com grupos diferentes, a 1ª linha pode ser um snapshot antigo.
+# A listagem completa sai em ordem cronológica; o último é o mais recente. Cabeçalho e verificação usam o mesmo ID.
+snaps=$(R snapshots --tag "$BACKUP_TAG" --compact | grep -E '^[0-9a-f]{8} ' || true)
+[ -n "$snaps" ] || { echo "nenhum snapshot com a tag $BACKUP_TAG" >&2; exit 1; }
+[ "$SNAP" != latest ] || SNAP=$(tail -1 <<< "$snaps" | cut -d' ' -f1)
+info=$(grep -E "^${SNAP:0:8} " <<< "$snaps" || true)
+[ -n "$info" ] || { echo "snapshot $SNAP não encontrado com a tag $BACKUP_TAG" >&2; exit 1; }
 echo "snapshot: $info"
 LIST=$(mktemp); trap 'rm -f "$LIST"' EXIT
-if [ "$SNAP" = latest ]; then R ls --tag "$BACKUP_TAG" latest > "$LIST"; else R ls "$SNAP" > "$LIST"; fi
+R ls "$SNAP" > "$LIST"
 
 PASS=0; FAIL=0; PEND=0
 need() { # categoria caminho [opcional]
