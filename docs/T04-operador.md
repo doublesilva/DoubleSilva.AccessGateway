@@ -19,9 +19,15 @@ marcado, o rollback é obrigatório.
 
 ## 1. Virada
 
+Abra o `tmux` **sozinho** e digite os demais comandos dentro dele. Não cole o `tmux new` junto com os outros comandos:
+o tmux abre e fecha imediatamente, e o resto roda fora dele. O `cutover.sh` detecta isso e recusa iniciar.
+
 ```sh
-tmux new -s cutover                     # se a conexão cair: ssh home-server; tmux attach -t cutover
-A=/srv/accessgateway/app/scripts
+tmux new -s cutover                     # 1º comando, isolado; se a conexão cair: ssh home-server; tmux attach -t cutover
+```
+
+```sh
+A=/srv/accessgateway/app/scripts        # já dentro do tmux (barra verde no rodapé)
 sudo $A/cutover.sh --kuma-token-rotated # digitar CUTOVER
 ```
 

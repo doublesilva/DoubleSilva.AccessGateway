@@ -152,7 +152,7 @@ check_snapshot() {
 
 check_ca() {
   step "Cópia offline da CA (GPG)"
-  if docker run --rm -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/ca/escrow_test.sh > "$TMP/escrow.out" 2>&1; then
+  if docker run --rm --tmpfs /mnt/midia -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/ca/escrow_test.sh > "$TMP/escrow.out" 2>&1; then
     ok "$(tail -1 "$TMP/escrow.out")"
   else
     bad "escrow da CA: $(tail -10 "$TMP/escrow.out")"

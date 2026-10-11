@@ -27,6 +27,12 @@ done
 require_root
 [ -n "$OUTPUT" ] || die "informe --output <diretório> (de preferência mídia removível)"
 [ -d "$OUTPUT" ] || die "diretório de saída inexistente: $OUTPUT"
+# A cópia precisa sair do servidor: recusa destino no mesmo sistema de arquivos do "/" ou da Green
+# (ex.: /media/usb sem a mídia montada é só um diretório do disco do sistema).
+out_fs=$(findmnt -n -o TARGET -T "$OUTPUT" 2>/dev/null || echo /)
+[ "$out_fs" != / ] || die "$OUTPUT está no disco do sistema (/): monte a mídia removível antes (findmnt $OUTPUT)"
+[ "$out_fs" != "$(findmnt -n -o TARGET -T "$GATEWAY_ROOT" 2>/dev/null || echo /)" ] || die "$OUTPUT está no mesmo disco da Green"
+log "destino: $OUTPUT ($(findmnt -n -o SOURCE,FSTYPE -T "$OUTPUT" | tr -s ' '))"
 [ -t 0 ] || die "execute em terminal interativo (a senha é digitada)."
 command -v gpg >/dev/null || die "gpg não encontrado"
 for f in root.crt root.key intermediate.crt intermediate.key; do
@@ -57,7 +63,7 @@ tar -C "$SOURCE" --owner=0 --group=0 --numeric-owner -cf - root.crt root.key int
           printf '%s' "$p1"
         )
 [ -s "$out" ] || die "arquivo cifrado não foi gerado"
-chmod 600 "$out"
+chmod 600 "$out" 2>/dev/null || true   # exFAT/FAT não suportam permissões
 
 # Metadados públicos (sem segredo) ao lado do arquivo, para conferência futura.
 {
@@ -69,7 +75,7 @@ chmod 600 "$out"
   echo "arquivo_sha256: $(sha256sum "$out" | cut -d' ' -f1)"
   echo "cifra: gpg simetrico AES256, S2K SHA512 iterado"
 } > "$out.txt"
-chmod 600 "$out.txt"
+chmod 600 "$out.txt" 2>/dev/null || true
 
 log "Verificando a cópia (será pedida a senha novamente)..."
 "$HERE/ca-escrow-verify.sh" "$out"
