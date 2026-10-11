@@ -15,7 +15,7 @@ SBIN=/usr/local/sbin
 
 # gitleaks:allow (hashes públicos dos scripts)
 SMOKE_KNOWN="c37811708069212fffb9b39892f4c6e4bc922cec3aa4bc5f703fcf79e526716e 9cc4c6ae5d97a2b9baf010ae60bbc7f06c7ec3f694f6c1d0596e4ee55bb8b7b4 90563aedfe7ea8934a841697418985628e40b696e0ed0c9b52169e2f3af134bd" # gitleaks:allow
-PUBLISH_KNOWN="c182cc551898bd6b7e6e5f4ee335684eec1a02dc6689ab0159db6edd9c2f29a8" # gitleaks:allow
+PUBLISH_KNOWN="c182cc551898bd6b7e6e5f4ee335684eec1a02dc6689ab0159db6edd9c2f29a8 89bbddf849442e7f23b45cad6abdc2bc81993729a3509b1dab202ecbf7446408" # gitleaks:allow (24/09 e T06.3)
 SMOKE_ORIG=c37811708069212fffb9b39892f4c6e4bc922cec3aa4bc5f703fcf79e526716e   # gitleaks:allow
 PUBLISH_ORIG=c182cc551898bd6b7e6e5f4ee335684eec1a02dc6689ab0159db6edd9c2f29a8 # gitleaks:allow
 
@@ -106,16 +106,21 @@ case "${1:-}" in
       read -r _ dst _ <<<"$(spec "$c")"
       log "$c instalado hoje: $dst (sha256 $(sha "$dst" | cut -c1-12)…; $(state "$c"))"
     done
+    log "Caminhos do dashboard (T07.3):"
+    bash "$HERE/smoke-paths.sh" report || true
     ;;
   --apply)
     for c in smoke publish; do
       [ "$(state "$c")" != desconhecido ] || die "$c: versão instalada desconhecida; nada alterado"
     done
+    bash "$HERE/smoke-paths.sh" ensure-shared   # diretório de saída do publicador (T07.3) antes de trocá-lo
     for c in smoke publish; do
       if [ "$(state "$c")" = instalado ]; then log "$c: já instalado"; else install_one "$c"; fi
     done
     log "Conferência do smoke:"
     "$SBIN/home-smoke-test" 2>&1 | summary || true
+    log "Caminhos do dashboard (T07.3):"
+    bash "$HERE/smoke-paths.sh" report || true
     log "O timer home-smoke-publish usa os novos scripts na próxima execução (≤ 5 min)."
     ;;
   --revert)

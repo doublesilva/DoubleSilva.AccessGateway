@@ -298,7 +298,7 @@ check_lint() {
   step "Lint e segredos"
   if docker run --rm --network none -v "$REPO:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
       -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh \
-      tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh \
+      tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh infra/home-smoke-test/smoke-paths.sh \
       tests/status-dashboard/*.sh tests/status-dashboard/stubs/* \
       infra/accessgateway-status-sync/accessgateway-status-sync infra/accessgateway-status-sync/install.sh \
       infra/home-server-backup/backup-home-server infra/home-server-backup/tests/*.sh \

@@ -198,7 +198,7 @@ install -m 755 "$SMOKE" /usr/local/sbin/home-smoke-test
 install -m 755 /repo/infra/home-smoke-test/home-smoke-publish /tmp/home-smoke-publish   # publicador da T06.3
 check "publish: executa e publica 31/0" bash -c "python3 /tmp/home-smoke-publish | grep -q 'Smoke publicado: 31 PASS / 0 FAIL'"
 check "publish: status.json ok=true, 31/0, com as checagens novas" python3 -c '
-import json; d = json.load(open("/opt/caddy/config/smoke-status/status.json"))
+import json; d = json.load(open("/srv/accessgateway/shared/smoke-status/status.json"))
 desc = [c["description"] for c in d["checks"]]
 assert d["passed"] == 31 and d["failed"] == 0 and d["ok"] is True, d
 assert "Gateway ativo em 443: Green (accessgateway-caddy)" in desc
@@ -206,13 +206,18 @@ assert "API HomeAutomation saudável (http://127.0.0.1:5100/health)" in desc
 assert "OutHome BFF pelo Tailscale (/bff/session sem sessão) (HTTP 401)" in desc
 assert "Panel responde via gateway (Tailscale, /stream sem sessão) (HTTP 401)" in desc
 '
-check "publish: index.html gerado" test -s /opt/caddy/config/smoke-status/index.html
+check "publish: index.html gerado" test -s /srv/accessgateway/shared/smoke-status/index.html
+check "publish (T07.3): grava só no novo diretório, nada em /opt/caddy" bash -c "[ ! -e /opt/caddy/config/smoke-status ]"
+check "publish (T07.3): diretório 750 root, arquivos 644, sem temporários" bash -c \
+  "[ \"\$(stat -c '%a %U' /srv/accessgateway/shared/smoke-status)\" = '750 root' ] && [ \"\$(stat -c %a /srv/accessgateway/shared/smoke-status/status.json /srv/accessgateway/shared/smoke-status/index.html | sort -u)\" = 644 ] && [ \"\$(ls -A /srv/accessgateway/shared/smoke-status | sort | paste -sd,)\" = 'index.html,status.json' ]"
+check "publish (T07.3): escrita atômica (temporário + fsync + os.replace)" bash -c \
+  "grep -q 'os.fsync(f.fileno())' /repo/infra/home-smoke-test/home-smoke-publish && grep -q 'os.replace(' /repo/infra/home-smoke-test/home-smoke-publish"
 check "Kuma: push status=up com 31 PASS / 0 FAIL" bash -c "tail -1 $KUMA_LOG | grep -q 'status=up' && tail -1 $KUMA_LOG | grep -q 'msg=31+PASS+%2F+0+FAIL'"
 green_active; touch "$SMOKE_STATE/api_down"
 python3 /tmp/home-smoke-publish >/dev/null
 check "Kuma: push status=down quando há falha real (API fora)" bash -c "tail -1 $KUMA_LOG | grep -q 'status=down' && tail -1 $KUMA_LOG | grep -q 'msg=30+PASS+%2F+1+FAIL'"
 check "publish: status.json ok=false com a falha real" python3 -c '
-import json; d = json.load(open("/opt/caddy/config/smoke-status/status.json")); assert d["ok"] is False and d["failed"] == 1, d'
+import json; d = json.load(open("/srv/accessgateway/shared/smoke-status/status.json")); assert d["ok"] is False and d["failed"] == 1, d'
 kill "$KUMA_PID" 2>/dev/null || true
 rm -f /etc/home-smoke-test/kuma-push-url
 
@@ -290,6 +295,28 @@ check "nenhum TLS desligado no fluxo de push (publicador e backup)" bash -c \
 check "backup: push via curl verifica TLS (sem -k; CA interna via --cacert)" bash -c \
   "grep -q 'tls=(--cacert \"\$KUMA_CACERT\")' /repo/infra/home-server-backup/backup-home-server"
 rm -f /etc/home-smoke-test/kuma-push-url
+
+# 15b. T07.3: caminhos do produtor e dos consumidores (smoke-paths.sh)
+SP=/repo/infra/home-smoke-test/smoke-paths.sh
+mkdir -p /tmp/sp/sbin /tmp/sp/units /tmp/sp-old
+export SMOKE_PATHS_SBIN=/tmp/sp/sbin SMOKE_PATHS_UNITS=/tmp/sp/units SMOKE_PATHS_NEW=/tmp/sp-new/smoke-status SMOKE_PATHS_OLD=/tmp/sp-old
+cp /repo/infra/home-smoke-test/baseline/home-smoke-publish.2026-09-24 /tmp/sp/sbin/home-smoke-publish
+printf 'SRC=${STATUS_SRC:-/opt/caddy/config/smoke-status}\n' > /tmp/sp/sbin/accessgateway-status-sync
+printf 'PathChanged=/opt/caddy/config/smoke-status/index.html\n' > /tmp/sp/units/accessgateway-status-sync.path
+check "paths: estado anterior (tudo em /opt/caddy) = consistente; release consistente no novo caminho" bash -c \
+  "bash $SP report | tee /tmp/sp.log >/dev/null; grep -q 'instalado: CONSISTENTE (/opt/caddy/config/smoke-status)' /tmp/sp.log && grep -q 'release:   CONSISTENTE (/srv/accessgateway/shared/smoke-status)' /tmp/sp.log"
+cp /repo/infra/accessgateway-status-sync/accessgateway-status-sync /tmp/sp/sbin/
+cp /repo/infra/accessgateway-status-sync/accessgateway-status-sync.path /tmp/sp/units/
+check "paths: só o sincronizador migrado (transição) = INCONSISTENTE" bash -c "bash $SP report | grep -q 'instalado: INCONSISTENTE'"
+cp /repo/infra/home-smoke-test/home-smoke-publish /tmp/sp/sbin/
+check "paths: produtor e consumidores migrados = CONSISTENTE no novo caminho" bash -c "bash $SP report | grep -q 'instalado: CONSISTENTE (/srv/accessgateway/shared/smoke-status)'"
+printf '{"ok": true}' > /tmp/sp-old/status.json; echo '<html>antigo</html>' > /tmp/sp-old/index.html
+check "ensure-shared: cria 750 e semeia com a publicação atual" bash -c \
+  "bash $SP ensure-shared >/dev/null && [ \"\$(stat -c %a /tmp/sp-new/smoke-status)\" = 750 ] && cmp -s /tmp/sp-old/index.html /tmp/sp-new/smoke-status/index.html"
+echo '<html>novo</html>' > /tmp/sp-new/smoke-status/index.html
+check "ensure-shared: não sobrescreve o diretório já em uso e não apaga o antigo" bash -c \
+  "bash $SP ensure-shared >/dev/null && grep -q novo /tmp/sp-new/smoke-status/index.html && [ -s /tmp/sp-old/index.html ]"
+unset SMOKE_PATHS_SBIN SMOKE_PATHS_UNITS SMOKE_PATHS_NEW SMOKE_PATHS_OLD
 
 # 16. install.sh: smoke e publicador; aplica sobre versões conhecidas, reverte por componente e recusa desconhecidos
 I=/repo/infra/home-smoke-test/install.sh

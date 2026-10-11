@@ -53,7 +53,7 @@ U=/repo/infra/accessgateway-status-sync
 check "service: oneshot, ProtectSystem=strict, escrita só no static/netdata-dashboard" bash -c \
   "grep -qx 'Type=oneshot' $U/accessgateway-status-sync.service && grep -qx 'ProtectSystem=strict' $U/accessgateway-status-sync.service && [ \"\$(grep -c '^ReadWritePaths=' $U/accessgateway-status-sync.service)\" = 1 ] && grep -qx 'ReadWritePaths=/srv/accessgateway/static/netdata-dashboard' $U/accessgateway-status-sync.service"
 check "path: gatilho no index.html publicado, aciona o service" bash -c \
-  "grep -qx 'PathChanged=/opt/caddy/config/smoke-status/index.html' $U/accessgateway-status-sync.path && grep -qx 'Unit=accessgateway-status-sync.service' $U/accessgateway-status-sync.path"
+  "grep -qx 'PathChanged=/srv/accessgateway/shared/smoke-status/index.html' $U/accessgateway-status-sync.path && grep -qx 'Unit=accessgateway-status-sync.service' $U/accessgateway-status-sync.path"
 check "nenhuma unit toca no home-smoke-publish ou no timer" bash -c "! grep -hvE '^[[:space:]]*#' $U/*.service $U/*.path | grep -qE 'home-smoke-publish|home-smoke-test'"
 
 # 3. caddy-reload.sh

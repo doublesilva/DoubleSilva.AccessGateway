@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Copia o dashboard do smoke test para o diretório servido pela Green (T06.4).
-#   origem:  /opt/caddy/config/smoke-status/{status.json,index.html}   (gerados por home-smoke-publish; não alterado)
+#   origem:  /srv/accessgateway/shared/smoke-status/{status.json,index.html}   (gerados por home-smoke-publish; T07.3)
 #   destino: /srv/accessgateway/static/netdata-dashboard/status/        (montado SOMENTE LEITURA no accessgateway-caddy
 #            em /config/netdata-dashboard; publicado em https://admin.home.doublesilva.com/status/, só home-admin)
 # Acionado por accessgateway-status-sync.path a cada nova publicação. Cópia atômica (arquivo temporário + rename);
 # um status.json inválido não substitui a cópia anterior; o destino contém somente os dois arquivos.
 set -Eeuo pipefail
-SRC=${STATUS_SRC:-/opt/caddy/config/smoke-status}
+SRC=${STATUS_SRC:-/srv/accessgateway/shared/smoke-status}
 DST=${STATUS_DST:-/srv/accessgateway/static/netdata-dashboard/status}
 FILES=(status.json index.html)
 

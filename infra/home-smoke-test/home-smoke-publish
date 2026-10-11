@@ -24,7 +24,10 @@ from urllib.request import urlopen
 
 SMOKE = "/usr/local/sbin/home-smoke-test"
 
-OUT_DIR = Path("/opt/caddy/config/smoke-status")
+# T07.3: saída fora de /opt/caddy (Blue). Lida por accessgateway-status-sync,
+# que copia para o diretório servido pela Green. O caminho antigo
+# (/opt/caddy/config/smoke-status) não é mais escrito nem apagado.
+OUT_DIR = Path("/srv/accessgateway/shared/smoke-status")
 JSON_FILE = OUT_DIR / "status.json"
 HTML_FILE = OUT_DIR / "index.html"
 
@@ -164,14 +167,20 @@ data = {
 # Garante diretório de saída
 #
 
+# Somente root (publicador e sincronizador rodam como root);
+# o modo só vale na criação.
 OUT_DIR.mkdir(
+    mode=0o750,
     parents=True,
     exist_ok=True
 )
 
 
 #
-# Escrita atômica para evitar arquivo parcial
+# Escrita atômica para evitar arquivo parcial:
+# temporário no mesmo diretório, fsync e rename.
+# Quem lê (accessgateway-status-sync) vê o arquivo
+# antigo ou o novo, nunca um parcial.
 #
 
 def atomic_write(path, content):
@@ -179,10 +188,12 @@ def atomic_write(path, content):
         str(path) + ".tmp"
     )
 
-    tmp.write_text(
-        content,
-        encoding="utf-8"
-    )
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.chmod(tmp, 0o644)
 
     os.replace(
         tmp,

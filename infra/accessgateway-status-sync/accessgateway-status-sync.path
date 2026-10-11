@@ -3,7 +3,7 @@ Description=Observa a publicação do smoke test e aciona a cópia para o Access
 
 [Path]
 # home-smoke-publish grava status.json e depois index.html (os dois com rename atômico): observar o último.
-PathChanged=/opt/caddy/config/smoke-status/index.html
+PathChanged=/srv/accessgateway/shared/smoke-status/index.html
 Unit=accessgateway-status-sync.service
 
 [Install]
