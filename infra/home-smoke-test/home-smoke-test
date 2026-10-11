@@ -4,7 +4,9 @@
 # atende a porta 443: o PID do listener (ss -p) é comparado ao PID principal de cada container de Caddy.
 #   Blue  = caddy + authelia                              (antes do cutover / após rollback)
 #   Green = accessgateway-caddy + accessgateway-authelia  (DoubleSilva.AccessGateway)
-# Nenhum gateway ou os dois ao mesmo tempo = FAIL (estado inconsistente). Versionado em
+# Nenhum gateway ou os dois ao mesmo tempo = FAIL (estado inconsistente).
+# T06.2: API, OutHome e Panel verificados nos endpoints reais (seções 7 e 8), sem sessão e sem iniciar login OIDC.
+# Versionado em
 # DoubleSilva.AccessGateway/infra/home-smoke-test; original preservado em baseline/.
 
 set -u
@@ -266,42 +268,66 @@ check_https_verified "Authelia via gateway com TLS verificado (Tailscale)" \
     auth.home.doublesilva.com /api/health "$TAILSCALE_IP" 200
 
 #
-# 7. API
+# 7. API e OutHome (T06.2)
 #
+# Desde 27/09 casa.home é o OutHome (React/Vite + BFF ASP.NET). A API não é mais publicada pelo gateway: só escuta
+# em 127.0.0.1:5100 e o BFF responde 404 a /api/* por desenho. As checagens antigas "API health pela LAN/Tailscale"
+# (https://casa.home/api/health) foram substituídas por:
+#   - a saúde da própria API no endpoint real (/health, JSON status=healthy);
+#   - o BFF do OutHome pela LAN e pelo Tailscale: /bff/session sem sessão = 401. Prova que o ASP.NET responde
+#     (o fallback do SPA daria 200 e uma queda, 502) sem iniciar login OIDC (/bff usa o cookie, não o desafio OIDC);
+#   - a API continua não exposta por casa.home (/api/health = 404 do BFF; 502/000 = OutHome fora).
+# Nenhuma delas usa sessão ou credencial.
 
-check_http \
-    "API health pela LAN" \
-    "https://casa.home/api/health" \
-    --resolve "casa.home:443:${LAN_IP}"
+API_HEALTH="$(curl -sS --connect-timeout 5 --max-time 10 http://127.0.0.1:5100/health 2>/dev/null)" || API_HEALTH=""
 
-check_http \
-    "API health pelo Tailscale" \
-    "https://casa.home/api/health" \
-    --resolve "casa.home:443:${TAILSCALE_IP}"
-
-#
-# 8. Blazor Panel
-#
-
-BLAZOR_CODE="$(
-    curl \
-        -k \
-        -sS \
-        -o /dev/null \
-        -w '%{http_code}' \
-        -X POST \
-        --connect-timeout 5 \
-        --max-time 10 \
-        --resolve "panel.home:443:${TAILSCALE_IP}" \
-        "https://panel.home/_blazor/negotiate?negotiateVersion=1" \
-        2>/dev/null
-)" || BLAZOR_CODE="000"
-
-if [[ "$BLAZOR_CODE" == "200" ]]; then
-    pass "Blazor negotiate via Tailscale (HTTP 200)"
+if grep -q '"status":"healthy"' <<<"$API_HEALTH"; then
+    pass "API HomeAutomation saudável (http://127.0.0.1:5100/health)"
 else
-    fail "Blazor negotiate via Tailscale (HTTP $BLAZOR_CODE)"
+    fail "API HomeAutomation sem saúde em http://127.0.0.1:5100/health (resposta: ${API_HEALTH:-nenhuma})"
 fi
+
+check_https_verified "OutHome BFF pela LAN (/bff/session sem sessão)" \
+    casa.home /bff/session "$LAN_IP" 401
+check_https_verified "OutHome BFF pelo Tailscale (/bff/session sem sessão)" \
+    casa.home /bff/session "$TAILSCALE_IP" 401
+check_https_verified "API não exposta por casa.home (/api/health bloqueado pelo BFF)" \
+    casa.home /api/health "$LAN_IP" 404
+
+#
+# 8. Panel (T06.2)
+#
+# Desde 25/09 panel.home redireciona (301) para panel.home.doublesilva.com, protegido pelo Authelia (forward_auth);
+# o antigo POST em https://panel.home/_blazor/negotiate só podia dar 301. O negotiate do Blazor exige sessão e, sem
+# ela, o Panel inicia um login OIDC (PAR no Authelia): não é usado. Substituído por:
+#   - o alias legado panel.home redireciona para o domínio atual;
+#   - panel.home.doublesilva.com sem sessão é desviado para o portal do Authelia (302), sem chegar ao Panel;
+#   - /stream/* (sem forward_auth, autenticado pelo próprio Panel por cookie) = 401: o Panel responde via gateway.
+
+check_redirect() { # descrição host caminho ip código prefixo_location
+    local out code location
+    out="$(
+        curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+            --cacert "$CA_ROOT" --connect-timeout 5 --max-time 10 \
+            --resolve "${2}:443:${4}" "https://${2}${3}" 2>/dev/null
+    )" || out="000"
+    code="${out%% *}"
+    location="${out#* }"
+    [[ "$location" == "$out" ]] && location=""
+
+    if [[ "$code" == "$5" && "$location" == "$6"* ]]; then
+        pass "$1 (HTTP $code)"
+    else
+        fail "$1 (HTTP $code${location:+ -> $location}; esperado $5 -> $6…)"
+    fi
+}
+
+check_redirect "panel.home redireciona para panel.home.doublesilva.com (Tailscale)" \
+    panel.home /react "$TAILSCALE_IP" 301 "https://panel.home.doublesilva.com/react"
+check_redirect "Panel exige login no Authelia (Tailscale)" \
+    panel.home.doublesilva.com / "$TAILSCALE_IP" 302 "https://auth.home.doublesilva.com/"
+check_https_verified "Panel responde via gateway (Tailscale, /stream sem sessão)" \
+    panel.home.doublesilva.com /stream/smoke-test "$TAILSCALE_IP" 401
 
 #
 # 9. Containers essenciais
