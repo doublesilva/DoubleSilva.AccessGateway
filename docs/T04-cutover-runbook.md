@@ -32,6 +32,7 @@ Os certificados já emitidos pela Green ficam no storage dela e são reaproveita
 
 ```sh
 sudo /srv/accessgateway/app/scripts/cutover.sh --plan --kuma-token-rotated   # 0 pendências
+tmux new -s cutover   # obrigatório: uma queda do SSH não interrompe a virada
 sudo /srv/accessgateway/app/scripts/cutover.sh --kuma-token-rotated          # digitar CUTOVER
 ```
 
@@ -49,7 +50,9 @@ sudo /srv/accessgateway/app/scripts/cutover.sh --kuma-token-rotated          # d
 | E10 | **logins reais** (§4); o operador confirma | se não confirmar: **rollback automático** |
 | E11 | `home-smoke-test`: esperadas as 3 falhas do baseline + 2 do container `caddy` parado | outras falhas: o operador avalia |
 
-Log completo: `/srv/accessgateway/logs/cutover-<data>.log`.
+Log completo: `/srv/accessgateway/logs/cutover-<data>.log`. Interrupção (INT/TERM/HUP) entre a E5 e a E10 dispara o
+rollback automático (trap); fora do `tmux`, o script recusa iniciar (salvo `--allow-no-tmux`). Folha do operador:
+[T04-operador.md](T04-operador.md).
 
 ## 4. Validação pós-cutover
 

@@ -14,6 +14,7 @@ check() { local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 export STUB_STATE=/tmp/stub
 export PATH="/repo/tests/cutover/stubs:$PATH"
 export WAIT_SECONDS=2
+export TMUX=teste   # cutover.sh exige tmux/screen (ou --allow-no-tmux)
 R=/srv/accessgateway
 
 # ------------------------------------------------------------------ ambiente simulado
@@ -138,7 +139,32 @@ check "sem rollback automático: estado preservado e instrução registrada" gre
 unset FAIL_GREEN_HTTP
 $RB --cutover --yes > /dev/null 2>&1 && check "rollback manual posterior: Blue dona" test "$(owner)" = blue
 
-# 12. rollback --plan não altera nada
+# 12. interrupção (TERM) durante a E8, com a Blue já parada → rollback automático pelo trap
+setup
+export STUB_SLOW_GREEN_UP=4 WAIT_SECONDS=10
+$CUT --kuma-token-rotated --yes > /tmp/t12.log 2>&1 &
+pid=$!
+for _ in $(seq 1 40); do grep -q 'E8 Caddy da Green' /tmp/t12.log 2>/dev/null && break; sleep 0.25; done
+kill -TERM "$pid" 2>/dev/null || true
+wait "$pid" 2>/dev/null && rc=0 || rc=$?
+unset STUB_SLOW_GREEN_UP; export WAIT_SECONDS=2
+LOGF=$(ls -t "$R"/logs/cutover-*.log | head -1)
+check "interrupção na E8: processo terminou com erro (rc=$rc)" test "$rc" -ne 0
+check "interrupção na E8: rollback disparado pelo sinal (registrado no log)" grep -q 'interrompido por sinal (TERM)' "$LOGF"
+check "interrupção na E8: Blue de volta a 80/443" test "$(owner)" = blue
+check "interrupção na E8: ambiente prep restaurado" test "$(mode)" = prep
+
+# 13. sem tmux/screen → recusa (salvo --allow-no-tmux)
+setup
+if env -u TMUX -u STY bash "$R/app/scripts/cutover.sh" --kuma-token-rotated --yes > /tmp/t13.log 2>&1; then
+  bad "sem tmux deveria recusar"
+else
+  ok "sem tmux/screen: cutover recusado"
+fi
+check "sem tmux: nenhuma alteração" test "$(changes)" -eq 0
+check "--allow-no-tmux: plan aceito" env -u TMUX -u STY bash "$R/app/scripts/cutover.sh" --plan --kuma-token-rotated --allow-no-tmux
+
+# 14. rollback --plan não altera nada
 setup
 before=$(changes)
 check "rollback --cutover --plan" $RB --cutover --plan

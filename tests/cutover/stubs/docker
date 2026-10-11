@@ -45,6 +45,7 @@ case "$1" in
           [ "${FAIL_AUTHELIA:-0}" = 1 ] && exit 1
           touch "$S/running/accessgateway-authelia"
         elif [ "$svc" = caddy ]; then
+          sleep "${STUB_SLOW_GREEN_UP:-0}"
           [ "$port" = 443 ] && run caddy && { echo "bind: address already in use" >&2; exit 1; }
           touch "$S/running/accessgateway-caddy"; echo "$port" > "$S/green_port"
         else

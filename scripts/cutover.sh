@@ -5,6 +5,9 @@
 #   cutover.sh --kuma-token-rotated         executa (pede a confirmação digitada "CUTOVER" no terminal)
 #   opções: --yes (dispensa a confirmação digitada; só para automação supervisionada)
 #           --no-auto-rollback (em falha crítica, para e aguarda o operador em vez de reverter sozinho)
+#           --allow-no-tmux (dispensa a exigência de executar dentro do tmux/screen)
+# Executar dentro do tmux: uma queda do SSH não interrompe a virada. Se o processo receber INT/TERM/HUP entre a E5 e
+# a E10, o rollback automático é executado (saída redirecionada só para o log, para sobreviver à perda do terminal).
 #
 # Etapas (a Blue só é tocada na E7, com `stop`; o rollback usa `start`, sem recriar):
 #   E1 registro do estado inicial         E2 parar a Green (preparação)
@@ -22,13 +25,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/common.sh
 . "$HERE/lib/common.sh"
 
-PLAN=0; YES=0; AUTO_ROLLBACK=1; KUMA_OK=0
+PLAN=0; YES=0; AUTO_ROLLBACK=1; KUMA_OK=0; ALLOW_NO_TMUX=0
 for arg in "$@"; do
   case "$arg" in
     --plan) PLAN=1 ;;
     --yes) YES=1 ;;
     --no-auto-rollback) AUTO_ROLLBACK=0 ;;
     --kuma-token-rotated) KUMA_OK=1 ;;
+    --allow-no-tmux) ALLOW_NO_TMUX=1 ;;
     *) die "opção inválida: $arg" ;;
   esac
 done
@@ -103,6 +107,16 @@ critical_fail() { # descrição
   exit 1
 }
 
+# Interrupção (queda do SSH, Ctrl+C, kill) durante a janela crítica: a saída passa a ir só para o log (o terminal pode
+# não existir mais) e o rollback automático é executado.
+on_signal() {
+  trap '' INT TERM HUP PIPE
+  exec >>"$LOG" 2>&1
+  critical_fail "cutover interrompido por sinal ($1)"
+}
+arm_signal_rollback()    { trap 'on_signal INT' INT; trap 'on_signal TERM' TERM; trap 'on_signal HUP' HUP; }
+disarm_signal_rollback() { trap - INT TERM HUP; }
+
 wait_https() { # porta → 0 quando auth /api/health = 200
   for _ in $(seq 1 "$WAIT_SECONDS"); do
     [ "$(https_code auth.home.doublesilva.com /api/health "$1")" = 200 ] && return 0
@@ -129,6 +143,8 @@ check "segredos (600), digests dos clients e CA da Green (fingerprint + par de c
 check "diretório casa-dashboard presente" test -d /opt/caddy/config/casa-dashboard
 check "raiz pública da CA legível" test -r "$CA_PUBLIC"
 check "arquivo de ambiente de produção disponível (env/cutover.env.example)" test -f "$GATEWAY_APP_DIR/env/cutover.env.example"
+in_multiplexer() { [ -n "${TMUX:-}" ] || [ -n "${STY:-}" ] || [ "$ALLOW_NO_TMUX" = 1 ]; }
+check "execução dentro do tmux/screen (queda do SSH não interrompe a virada)" in_multiplexer
 if [ "$KUMA_OK" = 1 ]; then
   log "[OK]   rotação do token do Kuma declarada pelo operador (--kuma-token-rotated)"
 else
@@ -177,7 +193,8 @@ $SNAPSHOT_CMD || die "snapshot falhou; a Blue não foi alterada (Green parada: r
 log "== E4 conferências =="
 secrets_ok && no_test_users || die "conferência falhou após o snapshot; a Blue não foi alterada"
 
-log "== E5 ambiente de produção da Green =="
+arm_signal_rollback
+log "== E5 ambiente de produção da Green ==   (interrupções a partir daqui disparam o rollback automático)"
 if grep -q '^GATEWAY_MODE=prep' "$GATEWAY_ENV_FILE"; then
   install -m 600 "$GATEWAY_ENV_FILE" "$GATEWAY_PREP_ENV_BACKUP"
 fi
@@ -222,6 +239,7 @@ EOF
   [ "$answer" = s ] || [ "$answer" = S ] || critical_fail "logins reais não confirmados pelo operador"
 fi
 
+disarm_signal_rollback
 log "== E11 smoke test do servidor =="
 smoke=$($SMOKE_CMD 2>&1 || true)
 fails=$(grep -c '\[FAIL\]' <<<"$smoke" || true)
