@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+
+set -u
+
+TAILSCALE_IP="100.115.190.21"
+LAN_IP="192.168.0.162"
+
+PASSED=0
+FAILED=0
+
+green='\033[0;32m'
+red='\033[0;31m'
+yellow='\033[0;33m'
+reset='\033[0m'
+
+pass() {
+    printf "${green}[PASS]${reset} %s\n" "$1"
+    PASSED=$((PASSED + 1))
+}
+
+fail() {
+    printf "${red}[FAIL]${reset} %s\n" "$1"
+    FAILED=$((FAILED + 1))
+}
+
+info() {
+    printf "${yellow}[INFO]${reset} %s\n" "$1"
+}
+
+check_http() {
+    local description="$1"
+    local url="$2"
+    shift 2
+
+    local code
+
+    code=$(
+        curl \
+            -k \
+            -sS \
+            -o /dev/null \
+            -w '%{http_code}' \
+            --connect-timeout 5 \
+            --max-time 10 \
+            "$@" \
+            "$url" \
+            2>/dev/null
+    ) || code="000"
+
+    if [[ "$code" == "200" ]]; then
+        pass "$description (HTTP $code)"
+    else
+        fail "$description (HTTP $code)"
+    fi
+}
+
+echo
+echo "========================================="
+echo " Home Server - Smoke Test"
+echo "========================================="
+echo
+
+#
+# 1. Tailscale
+#
+
+if systemctl is-active --quiet tailscaled; then
+    pass "tailscaled ativo"
+else
+    fail "tailscaled não está ativo"
+fi
+
+CURRENT_TS_IP="$(tailscale ip -4 2>/dev/null | head -1)"
+
+if [[ "$CURRENT_TS_IP" == "$TAILSCALE_IP" ]]; then
+    pass "IP Tailscale correto: $TAILSCALE_IP"
+else
+    fail "IP Tailscale esperado $TAILSCALE_IP, atual: ${CURRENT_TS_IP:-indisponível}"
+fi
+
+if ip link show tailscale0 >/dev/null 2>&1; then
+    pass "Interface tailscale0 presente"
+else
+    fail "Interface tailscale0 ausente"
+fi
+
+#
+# 2. Firewall persistente
+#
+
+if systemctl is-active --quiet home-server-docker-firewall.service; then
+    pass "Firewall persistente ativo"
+else
+    fail "home-server-docker-firewall.service inativo"
+fi
+
+if iptables -t nat -S HS-TAILSCALE-DNS >/dev/null 2>&1; then
+    pass "Chain HS-TAILSCALE-DNS presente"
+else
+    fail "Chain HS-TAILSCALE-DNS ausente"
+fi
+
+if iptables -t nat -S HS-TAILSCALE-DNS 2>/dev/null \
+    | grep -q -- "--to-destination ${LAN_IP}:53"; then
+
+    pass "Encaminhamento DNS Tailscale -> AdGuard presente"
+else
+    fail "Encaminhamento DNS Tailscale -> AdGuard ausente"
+fi
+
+#
+# 3. DNS
+#
+
+DNS_LAN="$(
+    dig @"$LAN_IP" casa.home +short +time=2 +tries=1 2>/dev/null \
+    | tail -1
+)"
+
+if [[ "$DNS_LAN" == "$LAN_IP" ]]; then
+    pass "DNS LAN: casa.home -> $LAN_IP"
+else
+    fail "DNS LAN de casa.home retornou: ${DNS_LAN:-sem resposta}"
+fi
+
+DNS_TS="$(
+    dig @"$TAILSCALE_IP" casa.home +short +time=2 +tries=1 2>/dev/null \
+    | tail -1
+)"
+
+if [[ "$DNS_TS" == "$LAN_IP" ]]; then
+    pass "DNS Tailscale: casa.home -> $LAN_IP"
+else
+    fail "DNS Tailscale de casa.home retornou: ${DNS_TS:-sem resposta}"
+fi
+
+#
+# 4. Caddy / Dashboard
+#
+
+check_http \
+    "casa.home pela LAN" \
+    "https://casa.home/" \
+    --resolve "casa.home:443:${LAN_IP}"
+
+check_http \
+    "casa.home pela interface Tailscale" \
+    "https://casa.home/" \
+    --resolve "casa.home:443:${TAILSCALE_IP}"
+
+#
+# 5. API
+#
+
+check_http \
+    "API health pela LAN" \
+    "https://casa.home/api/health" \
+    --resolve "casa.home:443:${LAN_IP}"
+
+check_http \
+    "API health pelo Tailscale" \
+    "https://casa.home/api/health" \
+    --resolve "casa.home:443:${TAILSCALE_IP}"
+
+#
+# 6. Blazor Panel
+#
+
+BLAZOR_CODE="$(
+    curl \
+        -k \
+        -sS \
+        -o /dev/null \
+        -w '%{http_code}' \
+        -X POST \
+        --connect-timeout 5 \
+        --max-time 10 \
+        --resolve "panel.home:443:${TAILSCALE_IP}" \
+        "https://panel.home/_blazor/negotiate?negotiateVersion=1" \
+        2>/dev/null
+)" || BLAZOR_CODE="000"
+
+if [[ "$BLAZOR_CODE" == "200" ]]; then
+    pass "Blazor negotiate via Tailscale (HTTP 200)"
+else
+    fail "Blazor negotiate via Tailscale (HTTP $BLAZOR_CODE)"
+fi
+
+#
+# 7. Containers essenciais
+#
+
+for container in \
+    caddy \
+    adguard \
+    homeautomation-api-1 \
+    homeautomation-panel-1
+do
+    RUNNING="$(
+        docker inspect \
+            --format '{{.State.Running}}' \
+            "$container" \
+            2>/dev/null
+    )"
+
+    if [[ "$RUNNING" == "true" ]]; then
+        pass "Container $container está em execução"
+    else
+        fail "Container $container não está em execução"
+    fi
+done
+
+#
+# 8. Validação Caddy
+#
+
+if docker exec caddy \
+    caddy validate \
+    --config /etc/caddy/Caddyfile \
+    >/dev/null 2>&1; then
+
+    pass "Caddyfile válido"
+else
+    fail "Caddyfile inválido"
+fi
+
+#
+# Resultado
+#
+
+echo
+echo "========================================="
+printf " PASS: %d\n" "$PASSED"
+printf " FAIL: %d\n" "$FAILED"
+echo "========================================="
+
+if [[ "$FAILED" -eq 0 ]]; then
+    printf "${green}SMOKE TEST: OK${reset}\n"
+    exit 0
+else
+    printf "${red}SMOKE TEST: FALHOU${reset}\n"
+    exit 1
+fi

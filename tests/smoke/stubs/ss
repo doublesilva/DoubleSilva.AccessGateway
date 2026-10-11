@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Stub do ss: $SMOKE_STATE/port<N> contém "PID NOME" de cada listener (uma linha por processo).
+S=${SMOKE_STATE:?}
+port=$(grep -o 'sport = :[0-9]*' <<<"$*" | cut -d: -f2)
+[ -f "$S/port$port" ] || exit 0
+while read -r pid name; do
+  [ -n "$pid" ] && echo "LISTEN 0      4096   *:$port *:*    users:((\"$name\",pid=$pid,fd=7))"
+done < "$S/port$port"

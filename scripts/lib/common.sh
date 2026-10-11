@@ -32,6 +32,9 @@ CA_PUBLIC=/etc/homeautomation/certs/caddy-local-root.crt
 LAN_IP=192.168.0.162
 TAILSCALE_IP=100.115.190.21
 TEST_USER_NAMES=(green-teste green-admin-teste)
+# Falhas do smoke anteriores à migração (baseline T01). Desde a T06.1 o smoke valida o gateway ativo: nenhuma outra
+# falha é esperada, inclusive "Container caddy"/"Caddyfile".
+SMOKE_KNOWN_FAILS='API health pela LAN \(HTTP 404\)|API health pelo Tailscale \(HTTP 404\)|Blazor negotiate via Tailscale \(HTTP 301\)'
 
 # Porta HTTPS publicada pelo Caddy da Green (vazio se não estiver em execução)
 green_https_port() { docker inspect "$GREEN_CADDY" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^GATEWAY_HTTPS_PORT=//p'; }

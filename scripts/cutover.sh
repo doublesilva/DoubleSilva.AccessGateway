@@ -248,8 +248,8 @@ disarm_signal_rollback
 log "== E11 smoke test do servidor =="
 smoke=$($SMOKE_CMD 2>&1 || true)
 fails=$(grep -c '\[FAIL\]' <<<"$smoke" || true)
-unexpected=$(grep '\[FAIL\]' <<<"$smoke" | grep -vE 'API health pela LAN|API health pelo Tailscale|Blazor negotiate|Container caddy|Caddyfile' || true)
-log "  smoke: $(grep -c '\[PASS\]' <<<"$smoke" || true) PASS, $fails FAIL (esperadas: 3 do baseline + 2 do container 'caddy' parado)"
+unexpected=$(grep '\[FAIL\]' <<<"$smoke" | grep -vE "$SMOKE_KNOWN_FAILS" || true)
+log "  smoke: $(grep -c '\[PASS\]' <<<"$smoke" || true) PASS, $fails FAIL (esperadas: as 3 do baseline)"
 [ -z "$unexpected" ] || { log "  falhas inesperadas:"; sed 's/^/    /' <<<"$unexpected"; warn "avalie antes de encerrar a janela"; }
 
 log "== Cutover concluído =="

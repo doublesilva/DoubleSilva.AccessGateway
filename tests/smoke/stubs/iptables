@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+echo "-A HS-TAILSCALE-DNS -p udp --dport 53 -j DNAT --to-destination 192.168.0.162:53"

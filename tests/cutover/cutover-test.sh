@@ -66,7 +66,7 @@ setup() {
 
   export SNAPSHOT_CMD="echo snapshot-simulado" VALIDATE_CMD=true CERT_CMD=true OIDC_CMD=true TOKEN_CMD=true
   export SMOKE_CMD=/tmp/smoke.sh
-  printf '#!/bin/sh\necho "[PASS] casa.home pela LAN"\necho "[FAIL] Container caddy não está em execução"\necho "[FAIL] Caddyfile inválido"\n' > /tmp/smoke.sh
+  printf '#!/bin/sh\necho "[PASS] casa.home pela LAN"\necho "[FAIL] API health pela LAN (HTTP 404)"\necho "[FAIL] Blazor negotiate via Tailscale (HTTP 301)"\n' > /tmp/smoke.sh
   chmod +x /tmp/smoke.sh
   unset FAIL_GREEN_HTTP FAIL_AUTHELIA BACKUP_ACTIVE
 }
@@ -202,7 +202,15 @@ check "falsificado: variáveis ignoradas (registrado)" grep -q 'nenhum processo 
 check "falsificado: nenhuma alteração" test "$(changes)" -eq 0
 check "--allow-no-tmux fora do tmux: plan aceito (contingência)" outside_tmux env -u TMUX -u STY $CUT --plan --kuma-token-rotated --allow-no-tmux
 
-# 17. rollback --plan não altera nada
+# 17. E11: só as falhas do baseline são conhecidas; "Caddyfile inválido" do gateway ativo não é mascarado
+check "E11 (cutover completo do caso 5): smoke só com falhas do baseline" bash -c "! grep -q 'falhas inesperadas' /tmp/t5.log"
+setup
+printf '#!/bin/sh\necho "[FAIL] API health pela LAN (HTTP 404)"\necho "[FAIL] Caddyfile inválido (accessgateway-caddy)"\n' > /tmp/smoke.sh
+$CUT --kuma-token-rotated --yes > /tmp/t17.log 2>&1 || true
+check "E11: Caddyfile inválido da Green reportado como falha inesperada" grep -q 'Caddyfile inválido (accessgateway-caddy)' /tmp/t17.log
+check "E11: falha inesperada sinalizada" grep -q 'falhas inesperadas' /tmp/t17.log
+
+# 18. rollback --plan não altera nada
 setup
 before=$(changes)
 check "rollback --cutover --plan" $RB --cutover --plan

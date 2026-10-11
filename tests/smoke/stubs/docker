@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Stub do docker para tests/smoke: estado em $SMOKE_STATE (running/<nome> = PID; health/<nome>; invalid/<nome>).
+S=${SMOKE_STATE:?}
+case "$1" in
+  inspect)
+    fmt=$3; name=$4
+    [ -e "$S/known/$name" ] || exit 1
+    if [ -s "$S/running/$name" ]; then running=true; pid=$(cat "$S/running/$name"); else running=false; pid=""; fi
+    case "$fmt" in
+      *Health*)
+        if [ "$running" = false ]; then echo parado
+        elif [ -s "$S/health/$name" ]; then cat "$S/health/$name"
+        else echo "sem healthcheck"; fi ;;
+      *State.Pid*) echo "$pid" ;;
+      *State.Running*) echo "$running" ;;
+    esac ;;
+  exec)
+    name=$2
+    echo "exec $*" >> "$S/calls.log"
+    [ -s "$S/running/$name" ] && [ ! -e "$S/invalid/$name" ] ;;
+  *) echo "docker stub: comando não suportado: $*" >&2; exit 2 ;;
+esac

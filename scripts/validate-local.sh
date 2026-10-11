@@ -13,7 +13,7 @@
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks).
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -261,11 +261,21 @@ check_cutover() {
   fi
 }
 
+check_smoke() {
+  step "Smoke test do servidor (T06.1: gateway ativo Blue/Green; docker/ss/curl simulados)"
+  if docker run --rm -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/smoke/smoke-test.sh > "$TMP/smoke.out" 2>&1; then
+    ok "home-smoke-test: $(tail -1 "$TMP/smoke.out")"
+  else
+    bad "home-smoke-test: $(grep -E '^\[FAIL\]' "$TMP/smoke.out" | head -8)"
+  fi
+}
+
 check_lint() {
   step "Lint e segredos"
   if docker run --rm --network none -v "$REPO:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
       -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh \
-      tests/cutover/*.sh tests/cutover/stubs/* infra/home-server-backup/backup-home-server infra/home-server-backup/tests/*.sh \
+      tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh \
+      infra/home-server-backup/backup-home-server infra/home-server-backup/tests/*.sh \
       > "$TMP/shellcheck.out" 2>&1; then
     ok "shellcheck (scripts, infra e testes)"
   else
@@ -285,7 +295,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke lint}"; do
   for s in $section; do "check_$s"; done
 done
 

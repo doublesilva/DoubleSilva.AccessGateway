@@ -47,7 +47,7 @@ docker ps --format '{{.Names}}' | grep -vE "^($GREEN_CADDY|$GREEN_AUTHELIA)$" | 
   printf '  %-28s restarts=%s health=%s\n' "$c" "${r%% *}" "${r#* }"
 done
 smoke=$(/usr/local/sbin/home-smoke-test 2>&1 || true)
-unexpected=$(grep '\[FAIL\]' <<<"$smoke" | grep -vE 'API health pela LAN|API health pelo Tailscale|Blazor negotiate|Container caddy|Caddyfile' || true)
+unexpected=$(grep '\[FAIL\]' <<<"$smoke" | grep -vE "$SMOKE_KNOWN_FAILS" || true)
 [ -z "$unexpected" ] && ok "smoke: $(grep -c '\[PASS\]' <<<"$smoke") PASS; só falhas conhecidas" || { bad "smoke com falhas inesperadas"; echo "$unexpected"; }
 
 printf '\nRESULTADO: %d PASS, %d FAIL\n' "$PASS" "$FAIL"

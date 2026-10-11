@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Stub do curl: responde como um gateway em 80/443 se houver algum listener de gateway; códigos do baseline real.
+S=${SMOKE_STATE:?}
+url=""; cacert=0; port=""
+for a in "$@"; do
+  case "$a" in
+    http://*|https://*) url=$a ;;
+    --cacert) cacert=1 ;;
+  esac
+done
+case "$url" in https://*) port=443 ;; *) port=80 ;; esac
+if [ ! -e "$S/gateway_up" ] || ! grep -q . "$S/port$port" 2>/dev/null; then printf 000; exit 7; fi
+if [ "$cacert" = 1 ] && [ -e "$S/bad_tls" ]; then printf 000; exit 60; fi
+case "$url" in
+  http://*) printf 308 ;;
+  https://casa.home/api/health) printf 404 ;;
+  https://panel.home/_blazor/negotiate*) printf 301 ;;
+  *) printf 200 ;;
+esac
