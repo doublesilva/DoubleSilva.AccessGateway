@@ -30,7 +30,7 @@ scripts/validate-local.sh          # caddy authelia compose snapshot ca e2e lint
 - [T01 — Inventário do gateway atual](docs/T01-inventario.md)
 - [T01 — Plano de migração Blue/Green e rollback](docs/T01-plano-migracao.md)
 - [T02 — Proposta](docs/T02-proposta.md) · [T02 — Relatório](docs/T02-relatorio.md)
-- [T03 — Runbook](docs/T03-runbook.md) · [T03.1 — Relatório](docs/T03.1-relatorio.md)
+- [T03 — Runbook](docs/T03-runbook.md) · [T03.1 — Relatório](docs/T03.1-relatorio.md) · [T03.2 — Relatório](docs/T03.2-relatorio.md)
 - [CA interna — backup offline e restauração](docs/CA-restauracao.md)
 - [INFRA-01 — Diagnóstico do backup do Home Server](docs/INFRA-01-diagnostico-backup.md)
 - [INFRA-03.1 — Relatório do backup v2](docs/INFRA-03.1-relatorio.md) ·

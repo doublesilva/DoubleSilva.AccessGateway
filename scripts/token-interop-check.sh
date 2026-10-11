@@ -45,7 +45,7 @@ import base64, json, sys
 t = sys.stdin.read().strip().split(".")
 dec = lambda s: json.loads(base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)))
 h, p = dec(t[0]), dec(t[1])
-print(f"alg={h.get(\"alg\")} kid={h.get(\"kid\")} iss={p.get(\"iss\")} aud={p.get(\"aud\")} scope={p.get(\"scope\") or p.get(\"scp\")} exp={p.get(\"exp\")}")'
+print("alg=%s kid=%s iss=%s aud=%s scope=%s" % (h.get("alg"), h.get("kid"), p.get("iss"), p.get("aud"), p.get("scope") or p.get("scp")))'
 }
 
 mcp_status() { # $1 = token (ou vazio) → código HTTP do initialize

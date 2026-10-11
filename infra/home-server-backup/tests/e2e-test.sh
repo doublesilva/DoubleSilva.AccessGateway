@@ -64,6 +64,12 @@ mkdir -p /mnt/home-events/snapshots/gate /mnt/home-events/database
 echo "jpg" > /mnt/home-events/snapshots/gate/evento-0001.jpg
 mkdb /mnt/home-events/database/home-events.db delete
 mkdb /mnt/home-events/database/gate-audit.db delete
+# AccessGateway Green: banco ativo (WAL) + cópias de provisionamento que não devem entrar no backup
+mkdb /srv/accessgateway/data/authelia/db.sqlite3 wal
+mkdir -p /srv/accessgateway/snapshots/authelia /srv/accessgateway/secrets/authelia
+echo "copia-provisionamento" > /srv/accessgateway/snapshots/authelia/authelia-antigo.sqlite3
+echo "banco-substituido" > /srv/accessgateway/data/authelia/db.sqlite3.replaced-20261010T000000
+echo "SEGREDO-FICTICIO-GREEN" > /srv/accessgateway/secrets/authelia/SESSION_SECRET
 mkdir -p /usr/local/sbin /etc/systemd/system /etc/sudoers.d
 cp "$SRC/backup-home-server" /usr/local/sbin/backup-home-server && chmod 700 /usr/local/sbin/backup-home-server
 
@@ -123,7 +129,11 @@ check "inclui biometria (perfis de voz)"      has /var/lib/docker/volumes/jarvis
 check "inclui biometria (calibração)"         has /srv/jarvis-calibration/enroll/amostra.webm
 check "inclui histórico do portão"            has /mnt/home-events/snapshots/gate/evento-0001.jpg
 check "inclui configuração do AdGuard"        has /home/diego/containers/adguard/conf/AdGuardHome.yaml
-check "inclui snapshots SQLite (7 bancos)"    test "$(grep -c '^/var/backups/home-server/current/sqlite/.*\.\(db\|sqlite3\)$' /tmp/ls.txt)" -eq 7
+check "inclui snapshots SQLite (8 bancos)"    test "$(grep -c '^/var/backups/home-server/current/sqlite/.*\.\(db\|sqlite3\)$' /tmp/ls.txt)" -eq 8
+check "Green: snapshot do banco ativo incluído" has /var/backups/home-server/current/sqlite/accessgateway-authelia/db.sqlite3
+check "Green: banco ativo excluído (sem duplicação)" bash -c '! grep -qE "^/srv/accessgateway/data/authelia/db\.sqlite3" /tmp/ls.txt'
+check "Green: cópias de provisionamento excluídas" bash -c '! grep -qE "^/srv/accessgateway/snapshots|replaced-" /tmp/ls.txt'
+check "Green: segredos incluídos"             has /srv/accessgateway/secrets/authelia/SESSION_SECRET
 check "exclui gravações de vídeo"             hasn frigate-storage
 check "exclui model_cache"                    hasn model_cache
 check "exclui certificados de folha"          hasn /opt/caddy/data/caddy/certificates
@@ -140,7 +150,7 @@ ok_db=0
 for f in /tmp/restore/var/backups/home-server/current/sqlite/*/*; do
   python3 "$SRC/tests/concurrency_helper.py" check "$f" >/dev/null && ok_db=$((ok_db + 1))
 done
-check "restauração: 7 bancos íntegros e consistentes (invariante a==b==contador)" test "$ok_db" -eq 7
+check "restauração: 8 bancos íntegros e consistentes (invariante a==b==contador)" test "$ok_db" -eq 8
 check "frigate.db: tabela virtual vec0 e tabela-sombra preservadas no snapshot" python3 -c '
 import sqlite3, sys
 c = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)

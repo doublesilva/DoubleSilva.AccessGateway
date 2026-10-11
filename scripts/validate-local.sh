@@ -203,6 +203,45 @@ check_e2e() {
   r=$(e2e_req panel.home /a?b=1)
   [ "$r" = "301 https://panel.home.doublesilva.com/a?b=1" ] && ok "panel.home 301 preserva caminho e query" || bad "panel.home: $r"
 
+  # Clients OIDC e usuário de teste: scripts de produção, com segredos fictícios (todos os digests = mesma senha).
+  printf '%s' ficticio-somente-teste > "$TMP/e2e/client-secret"
+  local tester=(docker run --rm --network container:accessgateway-e2e-caddy -v "$REPO:/repo:ro" -v "$REPO/$TMP/e2e:/e2e"
+    -e ALLOW_NON_ROOT=1 -e GATEWAY_CA=/e2e/data/caddy/caddy/pki/authorities/local/root.crt
+    -e PANEL_SECRET_FILE=/e2e/client-secret -e OUTHOME_SECRET_FILE=/e2e/client-secret -e JARVIS_SECRET_FILE=/e2e/client-secret
+    -e USERS_FILE=/e2e/data/authelia/users_database.yml -e PASSWORD_FILE=/e2e/green-test-user.password
+    "$PYTHON_IMAGE" bash -c 'apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq curl openssl >/dev/null 2>&1 && "$@"' _)
+  if "${tester[@]}" bash /repo/scripts/oidc-clients-check.sh > "$TMP/oidc.out" 2>&1; then
+    ok "oidc-clients-check: $(grep -c '^\[PASS\]' "$TMP/oidc.out") verificações (autorização, PAR, client_credentials, controles negativos)"
+  else
+    bad "oidc-clients-check: $(grep -E '^\[FAIL\]|ERRO' "$TMP/oidc.out" | head -5)"
+  fi
+
+  if ALLOW_NON_ROOT=1 AUTHELIA_CONTAINER=accessgateway-e2e-authelia USERS_FILE="$TMP/e2e/data/authelia/users_database.yml" \
+       PASSWORD_FILE="$TMP/e2e/green-test-user.password" bash scripts/green-test-user.sh create > "$TMP/user.out" 2>&1; then
+    ok "green-test-user create (senha aleatória gerada no container, não impressa)"
+  else
+    bad "green-test-user create: $(tail -3 "$TMP/user.out")"
+  fi
+  # No Docker Desktop o inotify do bind mount não é confiável: reinicia o Authelia de TESTE para recarregar o arquivo.
+  docker restart accessgateway-e2e-authelia >/dev/null && sleep 5
+  if "${tester[@]}" bash /repo/scripts/green-test-user.sh test > "$TMP/usertest.out" 2>&1; then
+    ok "green-test-user test: $(grep -c '^\[PASS\]' "$TMP/usertest.out") verificações (1º fator, sessão, matriz de autorização, logout)"
+  else
+    bad "green-test-user test: $(grep -E '^\[FAIL\]|ERRO' "$TMP/usertest.out" | head -6)"
+  fi
+  if grep -qf "$TMP/e2e/green-test-user.password" "$TMP"/oidc.out "$TMP"/user.out "$TMP"/usertest.out 2>/dev/null; then
+    bad "senha do usuário de teste apareceu na saída"
+  else
+    ok "senha do usuário de teste ausente das saídas"
+  fi
+  if ALLOW_NON_ROOT=1 USERS_FILE="$TMP/e2e/data/authelia/users_database.yml" PASSWORD_FILE="$TMP/e2e/green-test-user.password" \
+       bash scripts/green-test-user.sh remove > "$TMP/userrm.out" 2>&1 \
+     && ! grep -q 'green-teste' "$TMP/e2e/data/authelia/users_database.yml" && grep -q '^  teste:' "$TMP/e2e/data/authelia/users_database.yml"; then
+    ok "green-test-user remove (demais usuários preservados)"
+  else
+    bad "green-test-user remove: $(tail -3 "$TMP/userrm.out")"
+  fi
+
   GATEWAY_ROOT="$root" CASA_DASHBOARD_DIR="$root/casa" "${e2e[@]}" down -v > /dev/null 2>&1 && ok "stack de teste removida"
 }
 
