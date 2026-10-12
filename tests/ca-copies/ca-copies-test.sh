@@ -71,8 +71,8 @@ rm /tmp/www/caddy-root.crt
 check "cert.home 404: FAIL" bash -c "! $CHK > /tmp/o.log && grep -q 'FAIL\] http://cert.home/caddy-root.crt: 404' /tmp/o.log"
 kill "$SRV" 2>/dev/null || true
 
-check "inventário real: as 6 cópias conhecidas e a fonte oficial declarada" bash -c \
-  "[ \$(grep -cvE '^(#|$)' /repo/ca/copies.conf) -eq 6 ] && grep -q '|oficial|' /repo/ca/copies.conf && grep -q 'uptime-kuma' /repo/ca/copies.conf"
+check "inventário real: as 7 cópias conhecidas e a fonte oficial declarada" bash -c \
+  "[ \$(grep -cvE '^(#|$)' /repo/ca/copies.conf) -eq 7 ] && grep -q '|oficial|' /repo/ca/copies.conf && grep -q 'uptime-kuma' /repo/ca/copies.conf"
 
 printf '\nRESULTADO: %d PASS, %d FAIL\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

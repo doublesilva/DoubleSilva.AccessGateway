@@ -49,6 +49,7 @@ need "Bancos"      "$S/home-events/home-events.db"
 need "Green"       /srv/accessgateway/accessgateway.env opcional
 need "Green"       /srv/accessgateway/secrets/authelia/oidc/jwks-rsa.key opcional
 need "Green"       /srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.key opcional
+need "CA pública"  /etc/accessgateway/ca/caddy-root.crt opcional
 need "Green"       "$S/accessgateway-authelia/db.sqlite3" opcional
 if grep -qE '^/srv/accessgateway/data/authelia/db\.sqlite3$' "$LIST"; then
   printf '[FAIL] %-12s banco ativo da Green copiado como arquivo (deveria ir só por snapshot)\n' Green; FAIL=$((FAIL + 1))
