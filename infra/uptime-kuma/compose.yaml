@@ -1,0 +1,18 @@
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:2
+    container_name: uptime-kuma
+    restart: unless-stopped
+
+    dns:
+      - 192.168.0.162
+
+    environment:
+      - NODE_EXTRA_CA_CERTS=/etc/ssl/certs/caddy-root.crt
+
+    ports:
+      - "127.0.0.1:3001:3001"
+
+    volumes:
+      - ./data:/app/data
+      - /etc/accessgateway/ca/caddy-root.crt:/etc/ssl/certs/caddy-root.crt:ro
