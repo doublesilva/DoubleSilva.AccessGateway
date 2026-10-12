@@ -37,7 +37,8 @@ reset() {
   cp /tmp/mig/baseline/compose.yaml.2026-09-18 /tmp/kuma/compose.yaml
   install -m 644 "$K/root.crt" /tmp/canon/caddy-root.crt; install -m 600 "$K/root.crt" /tmp/blue/root.crt
   echo "$KUMA_BLUE_CA" > "$KS/mount"; echo 2026-10-08T09:46:02Z > "$KS/started"; echo 247505 > "$KS/hb"; : > "$KS/calls.log"
-  printf '#!/bin/sh\necho "[PASS] CA pública  /etc/accessgateway/ca/caddy-root.crt"\n' > /tmp/coverage.sh; chmod +x /tmp/coverage.sh
+  # Como o backup-coverage-check real: a linha procurada no meio de uma saída longa (reproduz o SIGPIPE do "| grep -q")
+  printf '#!/bin/sh\necho "snapshot: 1a2b3c4d  2026-10-12 12:30:15  home-server  home-server-v2"\necho "[PASS] Green        x"\necho "[PASS] CA pública  /etc/accessgateway/ca/caddy-root.crt"\nseq 1 200000 | sed "s/^/[PASS] item /"\necho "RESULTADO: 19 PASS, 0 pendente(s), 0 FAIL"\n' > /tmp/coverage.sh; chmod +x /tmp/coverage.sh
 }
 recreates() { grep -c 'force-recreate' "$KS/calls.log" || true; }
 

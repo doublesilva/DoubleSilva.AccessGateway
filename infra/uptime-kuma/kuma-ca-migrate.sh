@@ -115,8 +115,12 @@ case "$ACTION" in
     valid_ca "$CANON" && valid_ca "$BLUE_CA" && cmp -s "$CANON" "$BLUE_CA" \
       && log "[OK]   as duas origens: mesma raiz ($EXPECTED_ROOT_FP), sha256 $(sha "$CANON" | cut -c1-12)…" || die "origens divergentes ou inválidas"
     log "[OK]   permissões do canônico: $(stat -c '%U:%G %a' "$CANON")"
-    "$COVERAGE_CMD" | grep -q "PASS\] CA pública .*/etc/accessgateway/ca/caddy-root.crt" \
-      && log "[OK]   backup mais recente contém $CANON" || die "o backup ainda não contém $CANON (aguarde o backup das 12:30)"
+    # Saída capturada antes do grep: com pipefail, "cmd | grep -q" falharia por SIGPIPE no cmd mesmo com a linha encontrada.
+    cov=$("$COVERAGE_CMD" 2>&1 || true)
+    snapline=$(grep -m1 '^snapshot:' <<<"$cov" || true)
+    grep -q "PASS\] CA pública .*/etc/accessgateway/ca/caddy-root.crt" <<<"$cov" \
+      && log "[OK]   backup mais recente contém $CANON (${snapline:-snapshot ?})" \
+      || { grep -E 'CA pública|^snapshot:' <<<"$cov" | sed 's/^/    /'; die "o backup ainda não contém $CANON"; }
     rendered_equal "$HERE/baseline/compose.yaml.2026-09-18" "$NEW" \
       && log "[OK]   equivalência: compose renderizado idêntico salvo a origem do certificado" || die "compose renderizado difere além da origem do certificado"
     log "baseline do Kuma: $(docker inspect -f '{{.State.Health.Status}} desde {{.State.StartedAt}}, imagem {{.Image}}' "$KUMA" | cut -c1-90)"
