@@ -13,7 +13,7 @@
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks).
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -344,13 +344,22 @@ check_deployha() {
   fi
 }
 
+check_cacopies() {
+  step "Cópias da raiz da CA (T07.5: ca-copies-check.sh somente leitura, CA fictícia)"
+  if docker run --rm -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/ca-copies/ca-copies-test.sh > "$TMP/cacopies.out" 2>&1; then
+    ok "ca-copies: $(tail -1 "$TMP/cacopies.out")"
+  else
+    bad "ca-copies: $(grep -E '^\[FAIL\]' "$TMP/cacopies.out" | head -8)"
+  fi
+}
+
 check_lint() {
   step "Lint e segredos"
   if docker run --rm --network none -v "$REPO:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
       -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh \
       tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh infra/home-smoke-test/smoke-paths.sh \
       tests/status-dashboard/*.sh tests/status-dashboard/stubs/* tests/public-ca/*.sh \
-      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* \
+      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh \
       tests/deploy-homeautomation/*.sh infra/deploy-homeautomation/install.sh \
       infra/accessgateway-status-sync/accessgateway-status-sync infra/accessgateway-status-sync/install.sh \
       infra/home-server-backup/backup-home-server infra/home-server-backup/tests/*.sh \
@@ -381,7 +390,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies lint}"; do
   for s in $section; do "check_$s"; done
 done
 
