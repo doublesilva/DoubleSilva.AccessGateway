@@ -19,6 +19,29 @@ export SMOKE_STATE=/tmp/smoke-state
 SMOKE=/tmp/home-smoke-test
 install -m 755 /repo/infra/home-smoke-test/home-smoke-test "$SMOKE"
 
+# T07.5.3: CA fictícia instalada nos caminhos REAIS do inventário (ca/copies.conf) — o container é descartável.
+export SMOKE_CA_CHECK=/repo/scripts/ca-copies-check.sh
+ca_fixture() { # certificado → raiz oficial, publicada, canônica, HomeAutomation, Jarvis (+ link) e cert.home
+  local c=$1
+  ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP=$(openssl x509 -in "$c" -noout -fingerprint -sha256 | cut -d= -f2)
+  export ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP
+  install -d /srv/accessgateway/data/caddy/caddy/pki/authorities/local /srv/accessgateway/shared/public-certs \
+             /etc/accessgateway/ca /etc/homeautomation/certs /etc/jarvis/certs
+  install -m 600 "$c" /srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.crt
+  install -m 644 "$c" /srv/accessgateway/shared/public-certs/caddy-root.crt
+  install -m 644 "$c" /etc/accessgateway/ca/caddy-root.crt
+  install -m 644 "$c" /etc/homeautomation/certs/caddy-local-root.crt
+  install -m 440 "$c" /etc/jarvis/certs/caddy-local-root.crt
+  ln -sfn caddy-local-root.crt "/etc/jarvis/certs/$(openssl x509 -in "$c" -noout -subject_hash).0"
+  cp "$c" /tmp/cert-home.crt
+}
+mkdir -p /tmp/cafx
+openssl ecparam -name prime256v1 -genkey -noout -out /tmp/cafx/root.key 2>/dev/null
+openssl req -x509 -new -key /tmp/cafx/root.key -subj "/CN=Teste Smoke Root" -days 30 -addext basicConstraints=critical,CA:TRUE -out /tmp/cafx/root.crt 2>/dev/null
+openssl ecparam -name prime256v1 -genkey -noout -out /tmp/cafx/outra.key 2>/dev/null
+openssl req -x509 -new -key /tmp/cafx/outra.key -subj "/CN=Outra Root" -days 30 -addext basicConstraints=critical,CA:TRUE -out /tmp/cafx/outra.crt 2>/dev/null
+ca_fixture /tmp/cafx/root.crt
+
 # T06.2: sem falhas conhecidas; as 3 antigas (API health LAN/Tailscale, Blazor negotiate) foram substituídas.
 
 # estado: containers conhecidos, todos parados, portas livres
@@ -55,7 +78,7 @@ smoke() { # executa e guarda saída sem cores; retorna o código do smoke
 fails() { sed -n 's/^\[FAIL\] //p' /tmp/out.txt; }
 count() { grep -c "^\[$1\]" /tmp/out.txt || true; }
 has() { grep -qF -- "$1" /tmp/out.txt; }
-all_pass() { [ "$(count FAIL)" -eq 0 ] && [ "$(count PASS)" -eq 31 ]; }
+all_pass() { [ "$(count FAIL)" -eq 0 ] && [ "$(count PASS)" -eq 37 ]; }
 override() { printf "%s" "$2" > "$SMOKE_STATE/override/$(printf "%s" "$1" | tr "/:" "__")"; }
 
 # 1. Green ativa
@@ -67,7 +90,7 @@ check "Green: Caddyfile validado no accessgateway-caddy" has "[PASS] Caddyfile v
 check "Green: docker exec somente no gateway ativo" bash -c "grep -q 'exec accessgateway-caddy caddy validate' $SMOKE_STATE/calls.log && ! grep -q 'exec caddy ' $SMOKE_STATE/calls.log"
 check "Green: Authelia da Green saudável" has "[PASS] Container accessgateway-authelia (gateway Green) em execução e saudável"
 check "Green: TLS verificado e Authelia via gateway (LAN e Tailscale)" bash -c "grep -q 'PASS\] Authelia via gateway com TLS verificado (LAN)' /tmp/out.txt && grep -q 'PASS\] Authelia via gateway com TLS verificado (Tailscale)' /tmp/out.txt"
-check "Green: 31 PASS / 0 FAIL ($(count PASS) PASS / $(count FAIL) FAIL)" all_pass
+check "Green: 37 PASS / 0 FAIL ($(count PASS) PASS / $(count FAIL) FAIL)" all_pass
 check "Green: nenhuma menção a 'Container caddy'" bash -c "! grep -q 'Container caddy ' /tmp/out.txt"
 
 # 2. Blue ativa (Green em preparação, fora de 80/443) → suporte ao rollback
@@ -77,7 +100,7 @@ check "Blue: gateway ativo identificado" has "[PASS] Gateway ativo em 443: Blue 
 check "Blue: Caddyfile validado no caddy" has "[PASS] Caddyfile válido (caddy)"
 check "Blue: Authelia da Blue verificado" has "[PASS] Container authelia (gateway Blue) em execução e saudável"
 check "Blue: Green em preparação não é falha" has "[INFO] accessgateway-caddy em execução fora de 80/443 (preparação)"
-check "Blue: 31 PASS / 0 FAIL" all_pass
+check "Blue: 37 PASS / 0 FAIL" all_pass
 
 # 3. nenhum gateway (os dois Caddy parados; portas livres)
 reset_state
@@ -178,6 +201,43 @@ reset_state; smoke || true
 check "sem gateway: OutHome e Panel falham (000)" bash -c "grep -qF '[FAIL] OutHome BFF pela LAN (/bff/session sem sessão) (HTTP 000' /tmp/out.txt && grep -qF '[FAIL] Panel exige login no Authelia (Tailscale) (HTTP 000' /tmp/out.txt"
 check "sem gateway: a API local ainda é avaliada à parte" has "[PASS] API HomeAutomation saudável (http://127.0.0.1:5100/health)"
 
+# 13b. T07.5.3: integridade da CA no smoke (falhas reais e recuperação)
+green_active; smoke || true
+check "CA íntegra: 6 checagens da CA aprovadas, smoke 37/0" bash -c \
+  "[ \$(grep -cE '^\[PASS\] (CA |Inventário da CA)' /tmp/out.txt) -eq 6 ] && grep -q 'PASS\] CA do Jarvis .* com link de hash' /tmp/out.txt && grep -q 'PASS\] CA publicada em cert.home = oficial' /tmp/out.txt"
+check "CA: nenhum conteúdo de certificado ou chave na saída do smoke" bash -c "! grep -qiE 'BEGIN|PRIVATE' /tmp/out.txt"
+ca_case() { # rótulo linha_esperada comando-que-quebra
+  ca_fixture /tmp/cafx/root.crt; green_active; eval "$3"; smoke || true
+  check "CA quebrada ($1): FAIL '$2' + inventário com divergências" bash -c \
+    "grep -qF '[FAIL] $2' /tmp/out.txt && grep -q 'FAIL\] Inventário da CA com divergências' /tmp/out.txt"
+}
+ca_case "canônica com outra raiz" "CA canônica (/etc/accessgateway/ca) = oficial (Kuma): copia /etc/accessgateway/ca/caddy-root.crt: fingerprint" \
+  "install -m 644 /tmp/cafx/outra.crt /etc/accessgateway/ca/caddy-root.crt"
+ca_case "canônica ausente" "CA canônica (/etc/accessgateway/ca) = oficial (Kuma): copia /etc/accessgateway/ca/caddy-root.crt: ausente" \
+  "rm /etc/accessgateway/ca/caddy-root.crt"
+ca_case "HomeAutomation com chave anexada" "CA do HomeAutomation (/etc/homeautomation/certs) = oficial: copia /etc/homeautomation/certs/caddy-local-root.crt: 2 bloco(s) PEM" \
+  "cat /tmp/cafx/root.key >> /etc/homeautomation/certs/caddy-local-root.crt"
+ca_case "Jarvis sem link de hash" "CA do Jarvis (/etc/jarvis/certs) = oficial, com link de hash" \
+  "rm -f /etc/jarvis/certs/*.0"
+ca_case "Jarvis com permissão insegura" "CA do Jarvis (/etc/jarvis/certs) = oficial, com link de hash: copia+hash /etc/jarvis/certs/caddy-local-root.crt: permissão insegura" \
+  "chmod 666 /etc/jarvis/certs/caddy-local-root.crt"
+ca_case "cert.home 404" "CA publicada em cert.home = oficial" "touch \$SMOKE_STATE/cert_home_404"
+ca_case "cert.home servindo outra raiz" "CA publicada em cert.home = oficial" "cp /tmp/cafx/outra.crt /tmp/cert-home.crt"
+ca_case "raiz oficial ausente" "CA oficial (PKI da Green) com o fingerprint esperado" "rm /srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.crt"
+ca_fixture /tmp/cafx/root.crt; green_active; cat /tmp/cafx/root.key >> /etc/homeautomation/certs/caddy-local-root.crt
+"$SMOKE" > /tmp/k.raw 2>&1 || true
+check "CA quebrada: nenhuma chave nem certificado impressos mesmo com chave anexada" bash -c "! grep -qiE 'BEGIN|PRIVATE KEY' /tmp/k.raw"
+ca_fixture /tmp/cafx/root.crt; green_active
+SMOKE_CA_CHECK=/nao/existe smoke || true
+check "verificador ausente: FAIL explícito" has "[FAIL] Verificador da CA ausente: /nao/existe"
+ca_fixture /tmp/cafx/root.crt; green_active; smoke || true
+check "recuperação: CA restaurada → 37 PASS / 0 FAIL de novo" all_pass
+blue_active; smoke || true
+check "gateway Blue ativo: as checagens da CA independem do gateway (aqui o stub serve cert.home)" bash -c \
+  "[ \$(grep -cE '^\[PASS\] (CA |Inventário da CA)' /tmp/out.txt) -eq 6 ]"
+check "smoke nunca lê a chave da PKI (só o caminho do root.crt no inventário)" bash -c \
+  "! grep -vE '^[[:space:]]*#' /repo/infra/home-smoke-test/home-smoke-test | grep -q 'root.key' && ! grep -vE '^#' /repo/ca/copies.conf | grep -q '\\.key'"
+
 # 14. publicação: home-smoke-publish original, sem alterações; push ao Kuma coerente com o resultado
 KUMA_LOG=/tmp/kuma-requests.log; : > "$KUMA_LOG"
 python3 - "$KUMA_LOG" <<'PY' &
@@ -196,11 +256,11 @@ sleep 1
 green_active
 install -m 755 "$SMOKE" /usr/local/sbin/home-smoke-test
 install -m 755 /repo/infra/home-smoke-test/home-smoke-publish /tmp/home-smoke-publish   # publicador da T06.3
-check "publish: executa e publica 31/0" bash -c "python3 /tmp/home-smoke-publish | grep -q 'Smoke publicado: 31 PASS / 0 FAIL'"
-check "publish: status.json ok=true, 31/0, com as checagens novas" python3 -c '
+check "publish: executa e publica 37/0" bash -c "python3 /tmp/home-smoke-publish | grep -q 'Smoke publicado: 37 PASS / 0 FAIL'"
+check "publish: status.json ok=true, 37/0, com as checagens novas" python3 -c '
 import json; d = json.load(open("/srv/accessgateway/shared/smoke-status/status.json"))
 desc = [c["description"] for c in d["checks"]]
-assert d["passed"] == 31 and d["failed"] == 0 and d["ok"] is True, d
+assert d["passed"] == 37 and d["failed"] == 0 and d["ok"] is True, d
 assert "Gateway ativo em 443: Green (accessgateway-caddy)" in desc
 assert "API HomeAutomation saudável (http://127.0.0.1:5100/health)" in desc
 assert "OutHome BFF pelo Tailscale (/bff/session sem sessão) (HTTP 401)" in desc
@@ -212,10 +272,10 @@ check "publish (T07.3): diretório 750 root, arquivos 644, sem temporários" bas
   "[ \"\$(stat -c '%a %U' /srv/accessgateway/shared/smoke-status)\" = '750 root' ] && [ \"\$(stat -c %a /srv/accessgateway/shared/smoke-status/status.json /srv/accessgateway/shared/smoke-status/index.html | sort -u)\" = 644 ] && [ \"\$(ls -A /srv/accessgateway/shared/smoke-status | sort | paste -sd,)\" = 'index.html,status.json' ]"
 check "publish (T07.3): escrita atômica (temporário + fsync + os.replace)" bash -c \
   "grep -q 'os.fsync(f.fileno())' /repo/infra/home-smoke-test/home-smoke-publish && grep -q 'os.replace(' /repo/infra/home-smoke-test/home-smoke-publish"
-check "Kuma: push status=up com 31 PASS / 0 FAIL" bash -c "tail -1 $KUMA_LOG | grep -q 'status=up' && tail -1 $KUMA_LOG | grep -q 'msg=31+PASS+%2F+0+FAIL'"
+check "Kuma: push status=up com 37 PASS / 0 FAIL" bash -c "tail -1 $KUMA_LOG | grep -q 'status=up' && tail -1 $KUMA_LOG | grep -q 'msg=37+PASS+%2F+0+FAIL'"
 green_active; touch "$SMOKE_STATE/api_down"
 python3 /tmp/home-smoke-publish >/dev/null
-check "Kuma: push status=down quando há falha real (API fora)" bash -c "tail -1 $KUMA_LOG | grep -q 'status=down' && tail -1 $KUMA_LOG | grep -q 'msg=30+PASS+%2F+1+FAIL'"
+check "Kuma: push status=down quando há falha real (API fora)" bash -c "tail -1 $KUMA_LOG | grep -q 'status=down' && tail -1 $KUMA_LOG | grep -q 'msg=36+PASS+%2F+1+FAIL'"
 check "publish: status.json ok=false com a falha real" python3 -c '
 import json; d = json.load(open("/srv/accessgateway/shared/smoke-status/status.json")); assert d["ok"] is False and d["failed"] == 1, d'
 kill "$KUMA_PID" 2>/dev/null || true
@@ -237,7 +297,7 @@ leaf() { # nome CN SAN emissor(ca|self)
 leaf valido kuma.home.test kuma.home.test ca
 leaf outrohost outro.home.test outro.home.test ca
 leaf autoassinado kuma.home.test kuma.home.test self
-mkdir -p /etc/homeautomation/certs && cp "$PKI/ca.crt" /etc/homeautomation/certs/caddy-local-root.crt
+ca_fixture "$PKI/ca.crt"   # mesma CA para o push HTTPS e para as checagens de integridade (T07.5.3)
 echo '127.0.0.1 kuma.home.test' >> /etc/hosts
 
 cat > /tmp/kuma-srv.py <<'PY'
@@ -289,7 +349,7 @@ check "token nunca impresso em nenhum caso" bash -c "! grep -rq '$TOKEN' /tmp/pu
 echo "file:///etc/passwd?$TOKEN" > /etc/home-smoke-test/kuma-push-url
 green_active; python3 /tmp/home-smoke-publish > /tmp/pub.out 2>&1 || true
 check "esquema não http(s) recusado (sem ler arquivo local)" bash -c "grep -q 'esquema não suportado: file' /tmp/pub.out && ! grep -q '$TOKEN' /tmp/pub.out"
-check "publicação local continua mesmo com push falhando" bash -c "grep -q 'Smoke publicado: 31 PASS / 0 FAIL' /tmp/pub.out"
+check "publicação local continua mesmo com push falhando" bash -c "grep -q 'Smoke publicado: 37 PASS / 0 FAIL' /tmp/pub.out"
 check "nenhum TLS desligado no fluxo de push (publicador e backup)" bash -c \
   "! grep -nE '_create_unverified_context|CERT_NONE|check_hostname *= *False|--insecure|curl .* -k( |$)' /repo/infra/home-smoke-test/home-smoke-publish /repo/infra/home-server-backup/backup-home-server"
 check "backup: push via curl verifica TLS (sem -k; CA interna via --cacert)" bash -c \

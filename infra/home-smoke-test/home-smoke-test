@@ -381,6 +381,57 @@ else
 fi
 
 #
+# 11. Integridade da CA interna (T07.5.3)
+#
+# Usa o verificador SOMENTE LEITURA do AccessGateway (scripts/ca-copies-check.sh + ca/copies.conf): cada cópia em uso
+# é um único certificado, sem chave, CA com o fingerprint esperado e byte a byte igual à raiz oficial (PKI da Green;
+# só root.crt é lido, nunca a chave); o Jarvis precisa do link de hash; cert.home precisa servir a raiz oficial.
+# Independe do gateway ativo (após um rollback para a Blue, cert.home volta a 404 e a checagem acusa).
+
+CA_CHECK="${SMOKE_CA_CHECK:-/srv/accessgateway/app/scripts/ca-copies-check.sh}"
+
+if [[ -f "$CA_CHECK" ]]; then
+    CA_RC=0
+    CA_OUT="$(bash "$CA_CHECK" 2>&1)" || CA_RC=$?
+
+    ca_check() { # descrição padrão... (todas as linhas [PASS] exigidas)
+        local description="$1" pattern detail key
+        shift
+        for pattern in "$@"; do
+            if ! grep -qF -- "[PASS] $pattern" <<<"$CA_OUT"; then
+                # motivo: a linha [FAIL]/[INFO] do mesmo caminho (2º campo do padrão, sem ":" ou "(" finais)
+                key="$(awk '{print $2}' <<<"$pattern" | sed -E 's/[:(]+$//')"
+                detail="$(grep -F -- "$key" <<<"$CA_OUT" | grep -E '^\[(FAIL|INFO)\]' | head -1 | sed -E 's/^\[[A-Z]+\] //' | cut -c1-140)"
+                fail "$description: ${detail:-não verificado}"
+                return
+            fi
+        done
+        pass "$description"
+    }
+
+    ca_check "CA oficial (PKI da Green) com o fingerprint esperado" \
+        "oficial /srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.crt"
+    ca_check "CA canônica (/etc/accessgateway/ca) = oficial (Kuma)" \
+        "copia /etc/accessgateway/ca/caddy-root.crt"
+    ca_check "CA do HomeAutomation (/etc/homeautomation/certs) = oficial" \
+        "copia /etc/homeautomation/certs/caddy-local-root.crt"
+    ca_check "CA do Jarvis (/etc/jarvis/certs) = oficial, com link de hash" \
+        "copia+hash /etc/jarvis/certs/caddy-local-root.crt (" \
+        "copia+hash /etc/jarvis/certs/caddy-local-root.crt: link de hash"
+    ca_check "CA publicada em cert.home = oficial" \
+        "publicada /srv/accessgateway/shared/public-certs/caddy-root.crt" \
+        "http://cert.home/caddy-root.crt: 200"
+
+    if [[ "$CA_RC" -eq 0 ]]; then
+        pass "Inventário da CA sem divergências (ca-copies-check)"
+    else
+        fail "Inventário da CA com divergências: $(grep -c '^\[FAIL\]' <<<"$CA_OUT") falha(s) em ca-copies-check"
+    fi
+else
+    fail "Verificador da CA ausente: $CA_CHECK"
+fi
+
+#
 # Resultado
 #
 

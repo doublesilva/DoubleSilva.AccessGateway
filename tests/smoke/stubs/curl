@@ -49,6 +49,10 @@ if [ ! -e "$S/gateway_up" ] || ! grep -q . "$S/port$port" 2>/dev/null; then fail
 if [ "$cacert" = 1 ] && [ -e "$S/bad_tls" ]; then fail_conn 60; fi
 
 case "$url" in
+  http://cert.home/caddy-root.crt)
+    if [ -e "$S/cert_home_404" ] || [ ! -f "${SMOKE_CERT_HOME_FILE:-/tmp/cert-home.crt}" ]; then reply 404; fi
+    [ "$out" = /dev/null ] || cp "${SMOKE_CERT_HOME_FILE:-/tmp/cert-home.crt}" "$out"
+    reply 200 ;;
   http://*) reply 308 "https://${url#http://}" ;;
   https://casa.home/api/health) reply 404 ;;
   https://casa.home/bff/session) reply 401 ;;
