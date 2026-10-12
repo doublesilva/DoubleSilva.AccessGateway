@@ -13,7 +13,7 @@
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks).
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies cadistribute kuma lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies cadistribute kuma restoredrill lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -389,6 +389,54 @@ assert "<CA>" in [v["source"] for v in b["services"]["uptime-kuma"]["volumes"]]
   fi
 }
 
+check_restoredrill() {
+  step "Ensaio de restauração (T07.7): override de isolamento com uma instância real e segredos fictícios"
+  [ -d "$TMP/secrets" ] || dummy_secrets
+  local gr="$TMP/rd/srv/accessgateway" root
+  mkdir -p "$gr/data/caddy" "$gr/data/caddy-config" "$gr/data/authelia" "$gr/static/netdata-dashboard" "$gr/shared/public-certs" "$gr/app"
+  rm -rf "$gr/secrets"; mkdir -p "$gr/secrets"; cp -r "$TMP/secrets" "$gr/secrets/authelia"
+  cp "$TMP/data/users_database.yml" "$gr/data/authelia/"
+  echo '<html>netdata</html>' > "$gr/static/netdata-dashboard/index.html"
+  cp -r compose.yml caddy authelia "$gr/app/"
+  cp env/cutover.env.example "$gr/accessgateway.env"
+  root="$REPO/$TMP/rd/srv/accessgateway"
+  local dc=(docker compose -p agrestore --env-file "$gr/accessgateway.env" --project-directory "$gr/app" -f "$gr/app/compose.yml" -f infra/restore-drill/compose.restore.yml)
+  if GATEWAY_ROOT="$root" "${dc[@]}" config --format json > "$TMP/rd.json" 2>"$TMP/rd.err" && py -c '
+import json
+c = json.load(open("/repo/.tmp/validate/rd.json")); s = c["services"]
+assert c["name"] == "agrestore", c["name"]
+assert s["caddy"]["container_name"] == "agrestore-caddy" and s["authelia"]["container_name"] == "agrestore-authelia"
+assert "network_mode" not in s["caddy"] or s["caddy"]["network_mode"] != "host"
+assert [(p["host_ip"], str(p["published"])) for p in s["caddy"]["ports"]] == [("127.0.0.1", "28080"), ("127.0.0.1", "28443")]
+assert not s["authelia"].get("ports"), s["authelia"].get("ports")
+assert list(s["authelia"]["networks"]) == ["internal"] and c["networks"]["internal"]["internal"] is True
+assert all(v["source"].replace("\\\\", "/").find("/opt/caddy") < 0 for v in s["caddy"]["volumes"] + s["authelia"]["volumes"])
+' 2>"$TMP/rd-py.err"; then
+    ok "override: projeto e nomes agrestore, Caddy fora da rede do host e só no loopback 28080/28443, Authelia sem porta em rede interna, sem /opt/caddy"
+  else
+    bad "override de isolamento: $(cat "$TMP/rd.err" "$TMP/rd-py.err" | tail -4)"
+  fi
+  local null_out=/dev/null curl_x=()
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) null_out=NUL; curl_x=(--ssl-no-revoke) ;; esac
+  if GATEWAY_ROOT="$root" "${dc[@]}" up -d --wait --wait-timeout 120 > "$TMP/rd-up.log" 2>&1; then
+    local r=000
+    for _ in $(seq 1 30); do
+      r=$(curl -sS -o "$null_out" -w '%{http_code}' --max-time 5 "${curl_x[@]}" --cacert "$TMP/rd/srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.crt" \
+        --connect-to auth.home.doublesilva.com:443:127.0.0.1:28443 https://auth.home.doublesilva.com/api/health 2>/dev/null || echo 000)
+      [ "$r" = 200 ] && break; sleep 1
+    done
+    [ "$r" = 200 ] && ok "instância agrestore real: auth /api/health 200 em 127.0.0.1:28443 (TLS da CA da instância)" || bad "instância agrestore: auth $r"
+    r=$(curl -sS -o "$null_out" -w '%{http_code}' --max-time 5 "${curl_x[@]}" --cacert "$TMP/rd/srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.crt" \
+      --connect-to panel.home.doublesilva.com:443:127.0.0.1:28443 https://panel.home.doublesilva.com/stream/x 2>/dev/null || echo 000)
+    [ "$r" = 502 ] && ok "upstreams 127.0.0.1 apontam para o próprio container: 502 (nenhuma aplicação alcançada)" || bad "panel /stream: $r"
+  else
+    bad "instância agrestore não subiu: $(tail -5 "$TMP/rd-up.log")"
+  fi
+  GATEWAY_ROOT="$root" "${dc[@]}" down -v --remove-orphans > /dev/null 2>&1
+  [ -z "$(docker ps -a --filter name=^agrestore- -q)" ] && [ -z "$(docker network ls -q --filter name=^agrestore_)" ] \
+    && ok "instância agrestore removida (containers e redes)" || bad "restos da instância agrestore"
+}
+
 check_lint() {
   step "Lint e segredos"
   if docker run --rm --network none -v "$REPO:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" \
@@ -397,6 +445,7 @@ check_lint() {
       tests/status-dashboard/*.sh tests/status-dashboard/stubs/* tests/public-ca/*.sh \
       tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh tests/ca-distribute/*.sh \
       infra/home-server-backup/install-conf.sh infra/uptime-kuma/kuma-ca-migrate.sh tests/uptime-kuma/*.sh tests/uptime-kuma/stubs/* \
+      infra/restore-drill/restore-drill.sh \
       tests/deploy-homeautomation/*.sh infra/deploy-homeautomation/install.sh \
       infra/accessgateway-status-sync/accessgateway-status-sync infra/accessgateway-status-sync/install.sh \
       infra/home-server-backup/backup-home-server infra/home-server-backup/tests/*.sh \
@@ -427,7 +476,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies cadistribute kuma lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies cadistribute kuma restoredrill lint}"; do
   for s in $section; do "check_$s"; done
 done
 
