@@ -118,9 +118,16 @@ prod_n=$(curl -sS --max-time 5 --cacert "$CA_PUBLIC" https://auth.home.doublesil
   | python3 -c 'import json,sys,base64; k=json.load(sys.stdin)["keys"][0]; n=k["n"]; print(k.get("kid",""), base64.urlsafe_b64decode(n+"="*(-len(n)%4)).hex().upper())')
 rest_n=$(openssl rsa -in "$GR/secrets/authelia/oidc/jwks-rsa.key" -noout -modulus 2>/dev/null | cut -d= -f2)
 [ -n "$rest_n" ] && [ "${prod_n#* }" = "$rest_n" ] && ok "chave JWKS restaurada = chave pública publicada pela produção (kid ${prod_n%% *})" || bad "chave JWKS restaurada difere da produção"
-if grep -rhvE '^[[:space:]]*#' "$GR/app/compose.yml" "$GR/app/caddy" "$GR/accessgateway.env" "$OVERRIDE" | grep -q '/opt/caddy'; then
-  bad "configuração restaurada ainda referencia /opt/caddy"
-else ok "nenhuma referência a /opt/caddy (compose, Caddyfile, env)"; fi
+# Dependência real = o compose RENDERIZADO (montagens efetivas) ou o Caddyfile referenciam /opt/caddy. Referências
+# textuais sem uso (ex.: uma variável antiga no arquivo de ambiente) viram AVISO, com arquivo e nome (sem valor).
+rendered=$(GATEWAY_ROOT="$GR" docker compose -p "$PROJECT" --env-file "$GR/accessgateway.env" --project-directory "$GR/app" \
+             -f "$GR/app/compose.yml" config --format json 2>/dev/null || echo ERRO)
+if [ "$rendered" = ERRO ]; then bad "compose restaurado não renderiza"
+elif grep -q '/opt/caddy' <<<"$rendered" || grep -rhvE '^[[:space:]]*#' "$GR/app/caddy" | grep -q '/opt/caddy'; then
+  bad "dependência de /opt/caddy no compose renderizado ou no Caddyfile restaurados"
+else ok "nenhuma dependência de /opt/caddy (montagens do compose renderizado e Caddyfile restaurados)"; fi
+leftover=$(grep -HnE '^[A-Z_]+=.*/opt/caddy' "$GR/accessgateway.env" 2>/dev/null | sed -E 's#^.*/srv/accessgateway/##; s#^([^:]+):([0-9]+):([A-Z_]+)=.*#\1 linha \2: \3#' || true)
+[ -z "$leftover" ] || printf '[AVISO] referência textual sem uso a /opt/caddy: %s\n' "$leftover"
 
 log "== 3. validação das configurações (sem rede)"
 CADDY_IMG=$(docker inspect -f '{{.Config.Image}}' "$GREEN_CADDY"); AUTH_IMG=$(docker inspect -f '{{.Config.Image}}' "$GREEN_AUTHELIA")
