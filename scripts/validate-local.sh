@@ -217,6 +217,33 @@ e2e_kuma() {
     bad "kuma.home após o apply: $(grep -E '^\[FAIL\]' "$TMP/kuma-gw-alias2.out" | head -6)"
   fi
 
+  # Transição real do gateway (item 10 da homologação): Caddy de teste com a configuração ANTERIOR (release fa0242e,
+  # alias aberto) → reload para a NOVA enquanto pushes pelo alias são enviados a cada 100 ms. Nenhum push pode falhar.
+  local oldc="$TMP/caddy-fa0242e" cad=accessgateway-e2e-caddy hb0 hb1 loop
+  rm -rf "$oldc"; mkdir -p "$oldc"; git archive fa0242e caddy | tar -x -C "$oldc"
+  MSYS_NO_PATHCONV=1 docker cp "$oldc/caddy" "$cad:/tmp/caddy-anterior" > /dev/null
+  MSYS_NO_PATHCONV=1 docker exec "$cad" caddy reload --config /tmp/caddy-anterior/Caddyfile --adapter caddyfile --address localhost:2020 > /dev/null 2>&1
+  r=$(curl -sS -o "$null_out" --max-time 10 "${curl_tls[@]}" --connect-to kuma.home:443:127.0.0.1:18443 -w '%{http_code}' https://kuma.home/dashboard 2>/dev/null || echo 000)
+  if [ "$r" = 200 ]; then
+    hb0=$(MSYS_NO_PATHCONV=1 docker exec "$kname" sqlite3 -readonly /app/data/kuma.db "select count(*) from heartbeat where monitor_id=(select id from monitor where name='Home Server - Smoke Test')")
+    MSYS_NO_PATHCONV=1 docker run --rm "${gw_net[@]}" -v "$root:/e2e:ro" "$KUMA_IMAGE" node -e "$(cat tests/uptime-kuma/kuma-push-loop.js)" 80 100 \
+      > "$TMP/kuma-push-loop.out" 2>&1 &
+    loop=$!
+    sleep 3
+    MSYS_NO_PATHCONV=1 docker exec "$cad" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --address localhost:2020 > "$TMP/kuma-reload.out" 2>&1 \
+      && echo reload-ok >> "$TMP/kuma-reload.out"
+    wait "$loop" || true
+    hb1=$(MSYS_NO_PATHCONV=1 docker exec "$kname" sqlite3 -readonly /app/data/kuma.db "select count(*) from heartbeat where monitor_id=(select id from monitor where name='Home Server - Smoke Test')")
+    r=$(curl -sS -o "$null_out" --max-time 10 "${curl_tls[@]}" --connect-to kuma.home:443:127.0.0.1:18443 -w '%{http_code}' https://kuma.home/dashboard 2>/dev/null || echo 000)
+    if grep -q reload-ok "$TMP/kuma-reload.out" && grep -q 'push_ok=80 push_falha=0' "$TMP/kuma-push-loop.out" && [ "$((hb1 - hb0))" -ge 80 ] && [ "$r" = 301 ]; then
+      ok "reload do gateway anterior → novo com push a cada 100 ms: 80/80 pushes aceitos (+$((hb1 - hb0)) heartbeats), alias fechado depois (301)"
+    else
+      bad "transição do gateway: reload=$(tail -1 "$TMP/kuma-reload.out") $(cat "$TMP/kuma-push-loop.out") heartbeats=+$((hb1 - hb0)) alias=$r"
+    fi
+  else
+    bad "configuração anterior do Caddy não carregou no e2e (kuma.home/dashboard $r, esperado 200 do alias aberto)"
+  fi
+
   # A verificação externa usada na implantação (validate-green: classes de tests/routes.tsv + contorno por normalização)
   if "${tester[@]}" bash /repo/scripts/validate-green.sh --https-port 18443 --http-port 18080 --blue-https-port 18443 \
        > "$TMP/kuma-gw-validate-green.out" 2>&1; then

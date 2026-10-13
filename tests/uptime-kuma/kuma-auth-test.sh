@@ -10,7 +10,8 @@
 #   4. --apply com falha de login simulada: FALHA SEGURA (autenticação continua ligada; nada volta a expor), dados intactos;
 #   5. --apply: anônimo sem acesso, login legítimo aceito, senha antiga e sessão antiga (token) recusadas, token forjado
 #      recusado, push dos dois monitores funcionando, /metrics 401, dados e histórico preservados, sem reinício;
-#   6. --apply de novo: nada a fazer; --rollback recusado com o alias aberto e aceito só com o alias fechado; --restore-db:
+#   6. --apply de novo: nada a fazer; --rollback recusado com o alias ou o host autenticado abertos; --restore-db recusado
+#      com a autenticação desligada e com snapshot corrompido (Kuma volta protegido); --reset-password; --restore-db:
 #      banco do snapshot já com a autenticação ligada (sem janela de exposição), senha nova, dados do snapshot;
 #   7. nenhuma senha, token de push ou JWT nos logs do Kuma nem nas saídas do script.
 set -Eeuo pipefail
@@ -122,17 +123,31 @@ SNAPS=$(find "$W/backups" -name kuma.db | sort)
 echo "== idempotência, rollback e restauração =="
 ka --apply > "$W/again.out" 2>&1 && grep -q 'JÁ habilitada' "$W/again.out" && ! grep -q 'snapshot consistente' "$W/again.out" \
   && ok "--apply de novo: nada a fazer" || bad "--apply repetido: $(tail -2 "$W/again.out")"
-printf '#!/bin/sh\necho 200\n' > "$W/alias-aberto.sh"; printf '#!/bin/sh\necho 301\n' > "$W/alias-fechado.sh"; chmod +x "$W"/alias-*.sh
-if KUMA_ALIAS_CHECK_CMD="$W/alias-aberto.sh" ka --rollback > "$W/rollback0.out" 2>&1; then bad "--rollback com o alias aberto deveria recusar"
-else
-  grep -q 'recusado: o alias kuma.home não está fechado' "$W/rollback0.out" && [ "$(echo | sb anon)" = "estado=loginRequired admin=nao" ] \
-    && ok "--rollback recusado com o alias kuma.home aberto (não reabre o acesso anônimo)" || bad "--rollback com alias aberto: $(tail -2 "$W/rollback0.out")"
-fi
+# Stubs do teste de rede do --rollback: recebem host e caminho, imprimem o código HTTP
+printf '#!/bin/sh\necho 200\n' > "$W/alias-aberto.sh"
+printf '#!/bin/sh\n[ "$1" = kuma.home ] && echo 301 || echo 200\n' > "$W/alias-fechado-host-aberto.sh"
+printf '#!/bin/sh\n[ "$1" = kuma.home ] && echo 301 || echo 302\n' > "$W/alias-fechado.sh"; chmod +x "$W"/alias-*.sh
+for stub in alias-aberto alias-fechado-host-aberto; do
+  if KUMA_ALIAS_CHECK_CMD="$W/$stub.sh" ka --rollback > "$W/rollback-$stub.out" 2>&1; then bad "--rollback ($stub) deveria recusar"
+  else
+    grep -q 'recusado: o alias kuma.home não está fechado' "$W/rollback-$stub.out" && [ "$(echo | sb anon)" = "estado=loginRequired admin=nao" ] \
+      && ok "--rollback recusado ($stub): não reabre administração anônima pela rede" || bad "--rollback ($stub): $(tail -2 "$W/rollback-$stub.out")"
+  fi
+done
 KUMA_ALIAS_CHECK_CMD="$W/alias-fechado.sh" ka --rollback > "$W/rollback.out" 2>&1 && [ "$(echo | sb anon)" = "estado=autoLogin admin=sim" ] \
-  && ok "--rollback com o alias fechado (301) e confirmação: autenticação desligada temporariamente" || bad "--rollback: $(tail -3 "$W/rollback.out")"
+  && ok "--rollback só com a rede fechada (alias 301, host autenticado 302) e confirmação: autenticação desligada" || bad "--rollback: $(tail -3 "$W/rollback.out")"
+FIRST=$(dirname "$(head -1 <<<"$SNAPS")")
+started0=$(docker inspect -f '{{.State.StartedAt}}' "$NAME")
+if ka --restore-db "$FIRST" > "$W/restore-off.out" 2>&1; then bad "--restore-db com a autenticação desligada deveria recusar"
+else
+  grep -q 'recusado: a autenticação do Kuma não está ligada' "$W/restore-off.out" && [ "$(docker inspect -f '{{.State.StartedAt}}' "$NAME")" = "$started0" ] \
+    && ok "--restore-db recusado com a autenticação desligada (Kuma nem é parado)" || bad "--restore-db com auth desligada: $(tail -2 "$W/restore-off.out")"
+fi
+if ka --reset-password > "$W/reset-off.out" 2>&1; then bad "--reset-password com a autenticação desligada deveria recusar"
+else ok "--reset-password recusado com a autenticação desligada (use --apply)"; fi
 ka --apply > "$W/apply2.out" 2>&1 && [ "$(echo | sb anon)" = "estado=loginRequired admin=nao" ] \
   && ok "--apply depois do rollback: autenticação habilitada de novo" || bad "--apply após rollback"
-FIRST=$(dirname "$(head -1 <<<"$SNAPS")")
+
 ka --restore-db "$FIRST" > "$W/restore.out" 2>&1 && grep -q 'RESTORE concluído' "$W/restore.out" \
   && ok "--restore-db: banco do snapshot, senha nova definida e verificada" || bad "--restore-db: $(grep -E 'FALHA|ERRO' "$W/restore.out" | head -3)"
 grep -q 'Kuma de volta em .*conexão anônima: loginRequired' "$W/restore.out" \
@@ -143,12 +158,30 @@ grep -q 'Kuma de volta em .*conexão anônima: loginRequired' "$W/restore.out" \
 [ "$(q "select count(*) || '/' || sum(active) from monitor; select count(*) from notification; select count(*) from monitor_notification;" | paste -sd' ' -)" = "$fp0" ] \
   && ok "--restore-db: monitores, notificação e associações do snapshot" || bad "dados após o restore"
 [ -n "$(docker exec "$NAME" sh -c 'ls /app/data/kuma.db.antes-restauracao-* 2>/dev/null')" ] && ok "--restore-db: banco substituído guardado antes da troca" || bad "cópia do banco substituído ausente"
+
+# Snapshot corrompido: a troca é recusada e o Kuma volta com o banco atual (autenticação ligada)
+mkdir -p "$W/corrompido"; head -c 8192 /dev/urandom > "$W/corrompido/kuma.db"
+if ka --restore-db "$W/corrompido" > "$W/restore-bad.out" 2>&1; then bad "--restore-db com snapshot corrompido deveria falhar"
+else
+  grep -q 'restore não concluído' "$W/restore-bad.out" && [ "$(echo | sb anon)" = "estado=loginRequired admin=nao" ] \
+    && [ "$(printf '%s\n%s\n' "$NEW_PW" "$USER" | sb login)" = login=aceito ] \
+    && ok "--restore-db com snapshot corrompido: troca recusada, Kuma de volta com o banco atual e a autenticação ligada" \
+    || bad "snapshot corrompido: $(tail -3 "$W/restore-bad.out")"
+fi
 mkdir -p "$W/vazio"
 if ka --restore-db "$W/vazio" > /dev/null 2>&1; then bad "--restore-db sem snapshot deveria recusar"; else ok "--restore-db: recusa diretório sem kuma.db"; fi
 
+echo "== recuperação da senha administrativa (--reset-password) =="
+RESET_PW="Recuperada-$(rnd 24)"; printf '%s\n' "$RESET_PW" > "$W/pw-reset"
+PWFILE="$W/pw-reset" ka --reset-password > "$W/reset.out" 2>&1 && grep -q 'RESET concluído' "$W/reset.out" \
+  && ok "--reset-password: ferramenta oficial, senha só por stdin, verificação aprovada" || bad "--reset-password: $(tail -3 "$W/reset.out")"
+[ "$(echo | sb anon)" = "estado=loginRequired admin=nao" ] && [ "$(printf '%s\n%s\n' "$RESET_PW" "$USER" | sb login)" = login=aceito ] \
+  && [ "$(printf '%s\n%s\n' "$NEW_PW" "$USER" | sb login)" = login=recusado ] \
+  && ok "recuperação: senha nova aceita, anterior recusada, autenticação continua ligada" || bad "estado após a recuperação"
+
 echo "== dados sensíveis =="
 docker logs "$NAME" > "$W/kuma.log" 2>&1
-printf '%s\n' "$OLD_PW" "$NEW_PW" "$TOK_B" "$TOK_S" "$OLD_TOKEN" > "$W/segredos.pat"
+printf '%s\n' "$OLD_PW" "$NEW_PW" "$RESET_PW" "$TOK_B" "$TOK_S" "$OLD_TOKEN" > "$W/segredos.pat"
 if grep -qFf "$W/segredos.pat" "$W/kuma.log"; then bad "segredo encontrado nos logs do Kuma"; else ok "logs do Kuma sem senhas, tokens de push ou JWT"; fi
 if cat "$W"/*.out | grep -qFf "$W/segredos.pat"; then bad "segredo encontrado nas saídas do kuma-auth.sh"; else ok "saídas do kuma-auth.sh sem senhas, tokens de push ou JWT"; fi
 expect "kuma-auth.sh não passa a senha em argumentos (reset por diálogo no stdin, sem --new-password)" \

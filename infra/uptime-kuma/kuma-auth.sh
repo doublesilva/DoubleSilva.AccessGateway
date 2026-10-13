@@ -12,11 +12,12 @@
 #                                     vezes, sem eco) → reset-password → Enable Auth → verificação completa. Em falha
 #                                     depois de habilitar: FALHA SEGURA, a autenticação continua ligada (nunca volta
 #                                     sozinho ao login automático); recuperação por reset-password ou --restore-db
+#   kuma-auth.sh --reset-password     recuperação de acesso: senha nova (reset-password.js, só stdin) com a autenticação ligada
 #   kuma-auth.sh --restore-db <dir>   restaura o kuma.db de um snapshot do --apply: PARA o Kuma, troca o banco (cópia do
-#                                     atual guardada antes) já com a autenticação ligada (sem janela de exposição),
+#                                     atual guardada antes) já com a autenticação ligada; recusa se ela não estiver ligada antes (sem janela de exposição),
 #                                     inicia, define a senha nova (reset-password) e verifica. Exige digitar RESTAURAR
-#   kuma-auth.sh --rollback           desliga a autenticação (login automático). SÓ com o alias kuma.home comprovadamente
-#                                     fechado (301) e confirmação digitada EXPOR; fora disso recusa (T07.6.1: o rollback
+#   kuma-auth.sh --rollback           desliga a autenticação (login automático). SÓ com o acesso pela rede comprovadamente
+#                                     fechado (alias kuma.home 301; host autenticado 302) e confirmação digitada EXPOR; fora disso recusa (T07.6.1: o rollback
 #                                     não pode restaurar a exposição anônima)
 #
 # Nunca imprime senha, token, hash de senha ou URL de push. Monitores, notificações, histórico e tokens de push são
@@ -166,7 +167,7 @@ snapshot() { # → define SNAP
 fail_safe() { # motivo
   log "[FALHA] $1"
   log "FALHA SEGURA: autenticação mantida ligada (disableAuth=$(auth_setting); conexão anônima: $(state)). Nada foi revertido."
-  log "Recuperação: senha → docker exec -it $KUMA node extra/reset-password.js | dados → $0 --restore-db ${SNAP:-<snapshot>}"
+  log "Recuperação: senha → $0 --reset-password | dados → $0 --restore-db ${SNAP:-<snapshot>}"
   die "não concluído ($1)"
 }
 
@@ -186,14 +187,17 @@ verify_login() {
   [ "$(auth_setting)" = false ] && log "[OK]   setting disableAuth=false no banco" || fail_safe "setting disableAuth não gravado"
 }
 
-# Alias kuma.home fechado pelo gateway: a interface e o contorno por normalização recebem 301
+# Acesso pela rede fechado: no alias kuma.home, a interface e o contorno por normalização recebem 301; no host
+# autenticado, o portal do Authelia (302). Só então desligar a autenticação do Kuma não abre acesso anônimo pela rede.
 alias_closed() {
-  local p code
-  for p in /dashboard "/socket.io/../api/push/x?EIO=4&transport=polling"; do
-    if [ -n "${KUMA_ALIAS_CHECK_CMD:-}" ]; then code=$($KUMA_ALIAS_CHECK_CMD "$p")
+  local entry host p want code
+  for entry in "kuma.home /dashboard 301" "kuma.home /socket.io/../api/push/x?EIO=4&transport=polling 301" \
+               "kuma.home.doublesilva.com /dashboard 302"; do
+    read -r host p want <<<"$entry"
+    if [ -n "${KUMA_ALIAS_CHECK_CMD:-}" ]; then code=$($KUMA_ALIAS_CHECK_CMD "$host" "$p")
     else code=$(curl -sS --path-as-is -o /dev/null -w '%{http_code}' --max-time 10 --cacert "$CANON_CA" \
-                  --connect-to kuma.home:443:127.0.0.1:443 "https://kuma.home$p" 2>/dev/null || echo 000); fi
-    [ "$code" = 301 ] || { log "alias kuma.home$p: HTTP $code (esperado 301)"; return 1; }
+                  --connect-to "$host:443:127.0.0.1:443" "https://$host$p" 2>/dev/null || echo 000); fi
+    [ "$code" = "$want" ] || { log "$host$p: HTTP $code (esperado $want)"; return 1; }
   done
 }
 
@@ -220,13 +224,17 @@ case "$ACTION" in
     healthy && log "[OK]   healthcheck do Kuma" || fail_safe "healthcheck"
     unset PW
     log "APPLY concluído. Snapshot: $SNAP. Guarde a senha no gerenciador de senhas."
-    log "Recuperação: senha → docker exec -it $KUMA node extra/reset-password.js | dados → $0 --restore-db $SNAP"
+    log "Recuperação: senha → $0 --reset-password | dados → $0 --restore-db $SNAP"
     ;;
 
   --restore-db)
     SRC=${2:-}
     [ -s "$SRC/kuma.db" ] || die "informe o diretório do snapshot: --restore-db $BACKUPS/kuma-auth-<data>"
     container_running "$KUMA" || die "$KUMA não está em execução"
+    # Pré-condição: autenticação ligada AGORA. Se a troca falhar, o Kuma volta com o banco atual, que também a tem ligada:
+    # em nenhum caminho o Kuma inicia com a autenticação desligada.
+    [ "$(state)" = loginRequired ] && [ "$(auth_setting)" = false ] \
+      || die "recusado: a autenticação do Kuma não está ligada agora (rode --apply antes; o restore nunca inicia o Kuma exposto)"
     image=$(docker inspect -f '{{.Image}}' "$KUMA")
     log "ATENÇÃO: o Kuma vai PARAR durante a troca do banco (monitoramento e push indisponíveis por ~1 min)."
     log "O banco volta com a autenticação LIGADA e pede uma senha nova (a do snapshot não é usada)."
@@ -247,11 +255,13 @@ case "$ACTION" in
     if docker start -a "$helper" > /dev/null; then
       log "[OK]   banco restaurado de $SRC, com a autenticação ligada (atual guardado em /app/data/kuma.db.antes-restauracao-$stamp)"
     else
-      log "[FALHA] troca do banco recusada (snapshot inválido?); o banco atual não foi substituído"
+      swap_failed=1
+      log "[FALHA] troca do banco recusada (snapshot inválido?); o banco atual (com a autenticação ligada) não foi substituído"
     fi
     docker rm "$helper" > /dev/null
     docker start "$KUMA" > /dev/null
     secs=$(wait_up) || die "Kuma não respondeu em ${WAIT_SECONDS} s"
+    [ -z "${swap_failed:-}" ] || die "restore não concluído; Kuma de volta com o banco anterior (conexão anônima: $(state))"
     st=$(state)
     log "Kuma de volta em ${secs} s; disableAuth=$(auth_setting); conexão anônima: $st; dados: $(fingerprint)"
     [ "$st" = loginRequired ] || fail_safe "conexão anônima após a restauração: $st"
@@ -261,10 +271,20 @@ case "$ACTION" in
     log "RESTORE concluído: banco do snapshot, autenticação ligada, senha nova verificada."
     ;;
 
+  --reset-password)
+    # Recuperação de acesso: senha nova pela ferramenta oficial, autenticação mantida ligada (nunca desliga)
+    container_running "$KUMA" || die "$KUMA não está em execução"
+    [ "$(state)" = loginRequired ] || die "recusado: a autenticação não está ligada (use --apply)"
+    set_password
+    verify_login
+    unset PW
+    log "RESET concluído: senha nova verificada; autenticação ligada (disableAuth=$(auth_setting))."
+    ;;
+
   --rollback)
     container_running "$KUMA" || die "$KUMA não está em execução"
     alias_closed || die "recusado: o alias kuma.home não está fechado; desligar a autenticação reabriria o acesso anônimo"
-    log "alias kuma.home fechado (301). ATENÇÃO: sem a autenticação do Kuma, o acesso administrativo fica só atrás do Authelia"
+    log "acesso pela rede fechado (alias 301, host autenticado 302). ATENÇÃO: sem a autenticação do Kuma, o acesso administrativo fica só atrás do Authelia"
     log "e do host (127.0.0.1:3001). Use apenas temporariamente; religue com --apply."
     confirm EXPOR
     read_password once
@@ -274,5 +294,5 @@ case "$ACTION" in
     log "ROLLBACK concluído: disableAuth=$(auth_setting); conexão anônima: $(state); dados: $(fingerprint)"
     ;;
 
-  *) die "uso: kuma-auth.sh --check | --apply | --restore-db <snapshot> | --rollback" ;;
+  *) die "uso: kuma-auth.sh --check | --apply | --reset-password | --restore-db <snapshot> | --rollback" ;;
 esac
