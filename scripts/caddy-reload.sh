@@ -6,7 +6,8 @@
 #                                              configuração em execução: só as rotas declaradas em --expect podem mudar
 #   caddy-reload.sh --apply                    salva a configuração em execução, recarrega e valida
 #   caddy-reload.sh --revert <config.json>     recarrega uma configuração salva pelo --apply (desfaz na hora)
-#   opções: --expect HOST:CAMINHO (repetível; padrão: as rotas /status do admin, T06.4)
+#   opções: --expect HOST:CAMINHO (repetível; padrão: as rotas /status do admin, T06.4, quando não há --expect-host)
+#           --expect-host HOST    (repetível) o host inteiro pode mudar (ex.: kuma.home, T07.6.1); o resto tem de ser idêntico
 #
 # Validação após apply/revert: dono de 443 = green; auth /api/health 200; container não reiniciado (StartedAt e
 # RestartCount iguais). Configurações salvas em $GATEWAY_LOG_DIR/caddy-config-<data>.json (sem segredos).
@@ -15,18 +16,19 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/common.sh
 . "$HERE/lib/common.sh"
 
-ACTION=""; SAVED=""; EXPECT=()
+ACTION=""; SAVED=""; EXPECT=(); EXPECT_HOST=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --check|--apply) ACTION=${1#--} ;;
     --revert) ACTION=revert; SAVED=${2:-}; shift ;;
     --expect) EXPECT+=("$2"); shift ;;
+    --expect-host) EXPECT_HOST+=("$2"); shift ;;
     *) die "opção inválida: $1" ;;
   esac
   shift
 done
-[ -n "$ACTION" ] || die "uso: caddy-reload.sh --check | --apply | --revert <config.json> [--expect HOST:CAMINHO]"
-[ ${#EXPECT[@]} -gt 0 ] || EXPECT=("admin.home.doublesilva.com:/status" "admin.home.doublesilva.com:/status/*")
+[ -n "$ACTION" ] || die "uso: caddy-reload.sh --check | --apply | --revert <config.json> [--expect HOST:CAMINHO] [--expect-host HOST]"
+[ ${#EXPECT[@]} -gt 0 ] || [ ${#EXPECT_HOST[@]} -gt 0 ] || EXPECT=("admin.home.doublesilva.com:/status" "admin.home.doublesilva.com:/status/*")
 
 [ "${ALLOW_NON_ROOT:-}" = 1 ] || require_root
 PYTHON=${PYTHON:-python3}
@@ -43,6 +45,7 @@ adapt_installed() { docker exec "$GREEN_CADDY" caddy adapt --config /etc/caddy/C
 compare() { # atual novo → 0 se só as rotas esperadas diferem
   local args=() e
   for e in "${EXPECT[@]}"; do args+=(--green-only "$e"); done
+  for e in "${EXPECT_HOST[@]}"; do args+=(--diverge-host "$e"); done
   "$PYTHON" "$PARITY" "$1" "$2" --blue-authelia "$UPSTREAM" --green-authelia "$UPSTREAM" "${args[@]}"
 }
 
@@ -67,7 +70,7 @@ case "$ACTION" in
     log "[OK]   Caddyfile instalado válido (caddy validate no container)"
     adapt_installed > "$WORK/new.json" || die "caddy adapt falhou"
     if compare "$WORK/running.json" "$WORK/new.json" > "$WORK/diff.log" 2>&1; then
-      log "[OK]   diferença para a configuração em execução: somente ${EXPECT[*]}"
+      log "[OK]   diferença para a configuração em execução: somente ${EXPECT[*]}${EXPECT_HOST[*]:+ (hosts: ${EXPECT_HOST[*]})}"
     elif cmp -s <("$PYTHON" -m json.tool --sort-keys "$WORK/running.json") <("$PYTHON" -m json.tool --sort-keys "$WORK/new.json"); then
       log "configuração instalada idêntica à em execução: nada a recarregar"; exit 0
     else

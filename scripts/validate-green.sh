@@ -7,7 +7,8 @@
 #   - discovery OIDC com o issuer https://auth.home.doublesilva.com e /api/health = 200;
 #   - JWKS da Green idêntico ao da Blue (mesma chave de assinatura);
 #   - hosts com forward_auth: 302 para https://auth.home.doublesilva.com/?rd=...;
-#   - panel /stream/* sem forward_auth; aliases .home com 301 para *.home.doublesilva.com.
+#   - panel /stream/* sem forward_auth; aliases .home com 301 para *.home.doublesilva.com;
+#   - kuma.home (T07.6.1): só /api/push/<token> chega ao Kuma; caminhos crus que normalizam para o push (../) → 301.
 #
 # Uso: validate-green.sh [--https-port 18443] [--http-port 18080] [--blue-https-port 443]
 set -Eeuo pipefail
@@ -65,10 +66,19 @@ while IFS=$'\t' read -r scheme host path class; do
       [[ "$status" = 301 && "$location" = https://*.home.doublesilva.com/* ]] && ok "$label → 301 $location" || bad "$label: esperado 301, obtido $status $location" ;;
     open)
       [[ "$location" != "$ISSUER/?rd="* ]] && ok "$label → $status (sem forward_auth)" || bad "$label: não deveria exigir o portal" ;;
+    push)
+      [[ "$status" = 404 && -z "$location" ]] && ok "$label → 404 do Kuma (push sem redirecionamento)" || bad "$label: esperado 404 do Kuma, obtido $status $location" ;;
     auth|http)
       ok "$label → $status ${location:+($location)}" ;;
   esac
 done < "$ROUTES"
+
+echo "== kuma.home: contorno por normalização (T07.6.1) =="
+for p in "/socket.io/../api/push/x?EIO=4&transport=polling" "/dashboard/../api/push/x" "/api/push/./x"; do
+  r=$(curl -sS --path-as-is --max-time 10 "${CURL_EXTRA[@]}" --cacert "$CA" --connect-to "kuma.home:443:$TARGET:$HTTPS_PORT" \
+    -o /dev/null -w '%{http_code}' "https://kuma.home$p" 2>/dev/null || echo 000)
+  [ "$r" = 301 ] && ok "kuma.home$p → 301 (não alcança o Kuma)" || bad "kuma.home$p: $r (esperado 301)"
+done
 
 echo "== OIDC =="
 IFS='|' read -r status _ <<<"$(req "$HTTPS_PORT" https auth.home.doublesilva.com /api/health)"

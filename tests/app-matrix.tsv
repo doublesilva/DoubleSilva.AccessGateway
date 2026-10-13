@@ -31,7 +31,7 @@ HomeAssistant	ha.home	/	none	-	-
 Portainer	portainer.home.doublesilva.com	/	admin	https://127.0.0.1:9443/	-
 Portainer	portainer.home.doublesilva.com	/api/status	admin	https://127.0.0.1:9443/api/status	-
 Portainer	portainer.home	/	none	-	-
-# Uptime Kuma (forward_auth home-admin; alias .home sem forward_auth)
+# Uptime Kuma (forward_auth home-admin + login próprio desde a T07.6.1; alias .home: só /api/push/<token>, o resto 301)
 UptimeKuma	kuma.home.doublesilva.com	/	admin	http://127.0.0.1:3001/	-
 UptimeKuma	kuma.home	/	none	-	-
 # AdGuard (forward_auth home-admin + autenticação própria)

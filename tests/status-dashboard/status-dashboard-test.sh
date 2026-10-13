@@ -84,10 +84,19 @@ new = cfg(site("admin.home.doublesilva.com", status))
 for r in new["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"][0]["routes"]:
     if r.get("group") == "group7": r["group"] = "group8"
 unexpected = copy.deepcopy(new); unexpected["apps"]["http"]["servers"]["srv0"]["routes"][1]["handle"][0]["routes"][1]["handle"][0]["upstreams"][0]["dial"] = "127.0.0.1:9999"
-for n, c in (("running", running), ("new", new), ("unexpected", unexpected)):
+# T07.6.1: alias kuma.home aberto (proxy de tudo) x fechado (push + 301); só o host inteiro muda
+proxy = {"handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:3001"}]}]}
+alias_open = {"match": [{"host": ["kuma.home"]}], "handle": [{"handler": "subroute", "routes": [proxy]}], "terminal": True}
+alias_closed = {"match": [{"host": ["kuma.home"]}], "handle": [{"handler": "subroute", "routes": [
+    {"group": "group9", "match": [{"method": ["GET", "POST"], "path_regexp": {"name": "push", "pattern": "^/api/push/[^/]+$"}}], "handle": [{"handler": "subroute", "routes": [proxy]}]},
+    {"group": "group9", "handle": [{"handler": "subroute", "routes": [{"handle": [{"handler": "static_response", "status_code": 301}]}]}]}]}], "terminal": True}
+krun = copy.deepcopy(new); krun["apps"]["http"]["servers"]["srv0"]["routes"].append(alias_open)
+knew = copy.deepcopy(new); knew["apps"]["http"]["servers"]["srv0"]["routes"].append(alias_closed)
+kbad = copy.deepcopy(knew); kbad["apps"]["http"]["servers"]["srv0"]["routes"][1]["handle"][0]["routes"][1]["handle"][0]["upstreams"][0]["dial"] = "127.0.0.1:9999"
+for n, c in (("running", running), ("new", new), ("unexpected", unexpected), ("krun", krun), ("knew", knew), ("kbad", kbad)):
     json.dump(c, open(f"/tmp/fx-{n}.json", "w"))
 PY
-rs_reset() { rm -rf "$RS"; mkdir -p "$RS"; cp /tmp/fx-running.json "$RS/running.json"; cp "/tmp/fx-${1:-new}.json" "$RS/installed.json"; echo "2026-10-11T16:23:50Z 0" > "$RS/started"; : > "$RS/calls.log"; rm -f /tmp/gw/logs/caddy-config-*; }
+rs_reset() { rm -rf "$RS"; mkdir -p "$RS"; cp "/tmp/fx-${2:-running}.json" "$RS/running.json"; cp "/tmp/fx-${1:-new}.json" "$RS/installed.json"; echo "2026-10-11T16:23:50Z 0" > "$RS/started"; : > "$RS/calls.log"; rm -f /tmp/gw/logs/caddy-config-*; }
 reloads() { grep -c 'caddy reload' "$RS/calls.log" || true; }
 
 rs_reset new
@@ -115,6 +124,16 @@ check "container reiniciado: instrução de revert registrada" grep -q -- '--rev
 rs_reset new; echo 502 > "$RS/health_code"
 if $RELOAD --apply > /tmp/rl.log 2>&1; then bad "auth fora deveria reprovar"; else ok "reload --apply: auth /api/health != 200 reprova a validação"; fi
 check "reload --revert: recusa arquivo inexistente" bash -c "! $RELOAD --revert /tmp/nao-existe.json >/dev/null 2>&1"
+
+# T07.6.1: --expect-host (o host inteiro kuma.home pode mudar; nada mais)
+rs_reset knew krun
+check "reload --check --expect-host kuma.home: só o alias muda → pronto" bash -c "$RELOAD --check --expect-host kuma.home | grep -q 'CHECK: pronto' && [ \$(grep -c 'caddy reload' $RS/calls.log) -eq 0 ]"
+rs_reset knew krun
+if $RELOAD --check > /tmp/rl.log 2>&1; then bad "reload --check sem --expect-host deveria recusar a mudança do kuma.home"; else ok "reload --check: mudança do kuma.home não declarada é recusada"; fi
+rs_reset kbad krun
+if $RELOAD --check --expect-host kuma.home > /tmp/rl.log 2>&1; then bad "--expect-host kuma.home não pode aceitar mudança em outro host"; else ok "reload --check --expect-host kuma.home: mudança em outro host recusada"; fi
+rs_reset knew krun
+check "reload --apply --expect-host kuma.home: recarrega e valida" bash -c "$RELOAD --apply --expect-host kuma.home | grep -q 'APPLY concluído' && cmp -s $RS/running.json /tmp/fx-knew.json"
 
 printf '\nRESULTADO: %d PASS, %d FAIL\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

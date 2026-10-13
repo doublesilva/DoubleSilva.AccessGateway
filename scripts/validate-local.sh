@@ -13,7 +13,7 @@
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks).
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies cadistribute kuma restoredrill lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies cadistribute kuma kumaauth restoredrill lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -57,14 +57,29 @@ check_caddy() {
   docker run --rm --network none -v "$REPO/tests/baseline:/b:ro" "$CADDY_IMAGE" \
     caddy adapt --config /b/blue.Caddyfile --adapter caddyfile > "$TMP/blue.json" 2>/dev/null
 
-  # Divergências permitidas: o dashboard do smoke (T06.4) e a origem da raiz pública do cert.home (T07.4).
+  # Divergências permitidas: o dashboard do smoke (T06.4), a origem da raiz pública do cert.home (T07.4) e o alias
+  # kuma.home (T07.6.1, contrato conferido logo abaixo).
   if py tests/tools/caddy_parity.py "$TMP/blue.json" "$TMP/green-prod.json" \
        --green-only admin.home.doublesilva.com:/status --green-only 'admin.home.doublesilva.com:/status/*' \
-       --green-replace /config/public-certs=/config/casa-dashboard; then
-    ok "paridade de rotas Blue == Green (produção; exceto /status do admin, T06.4, e a raiz do cert.home, T07.4)"
+       --green-replace /config/public-certs=/config/casa-dashboard --diverge-host kuma.home; then
+    ok "paridade de rotas Blue == Green (produção; exceto /status do admin, T06.4, a raiz do cert.home, T07.4, e kuma.home, T07.6.1)"
   else
     bad "paridade de rotas Blue x Green"
   fi
+  local out
+  if out=$(py tests/tools/kuma_alias_check.py "$TMP/green-prod.json"); then ok "kuma.home: $out"; else bad "kuma.home: $out"; fi
+  # Controle negativo: o alias antigo (proxy de tudo, como na Blue) tem de ser recusado pelo verificador.
+  if out=$(py tests/tools/kuma_alias_check.py "$TMP/blue.json"); then bad "kuma_alias_check aceitou o alias aberto da Blue"
+  else ok "kuma_alias_check recusa o alias aberto da Blue (${out%%:*})"; fi
+  # Controle negativo: sem o matcher do caminho CRU (só path_regexp), "/socket.io/../api/push/x" chegaria ao engine.io.
+  py -c 'import json; c = json.load(open(".tmp/validate/green-prod.json"))
+for s in c["apps"]["http"]["servers"].values():
+    for r in s["routes"]:
+        if {h for m in r.get("match", []) for h in m.get("host", [])} == {"kuma.home"}:
+            r["handle"][0]["routes"][0]["match"][0].pop("expression")
+json.dump(c, open(".tmp/validate/green-sem-expression.json", "w"))'
+  if out=$(py tests/tools/kuma_alias_check.py "$TMP/green-sem-expression.json"); then bad "kuma_alias_check aceitou o alias sem o matcher do caminho cru"
+  else ok "kuma_alias_check recusa o alias sem o matcher do caminho cru (contorno por normalização)"; fi
 
   if py tests/tools/caddy_listen.py "$TMP/green-prep.json" --expect 127.0.0.1:18443 127.0.0.1:18080 --admin localhost:2020; then
     ok "modo preparação: somente loopback 18080/18443, admin localhost:2020"
@@ -160,6 +175,80 @@ check_ca() {
   else
     bad "escrow da CA: $(tail -10 "$TMP/escrow.out")"
   fi
+}
+
+# T07.6.1: Uptime Kuma descartável (imagem de produção, credenciais fictícias) no namespace de rede do Caddy de teste,
+# atrás das regras reais do gateway. Usa "tester" e "root" do check_e2e (escopo dinâmico). Ordem: alias com o Kuma ainda
+# exposto (o gateway sozinho fecha) → kuma-auth.sh --apply → alias de novo → sessão home-admin + login do Kuma pelo
+# Socket.IO → logout → handshake recusado.
+e2e_kuma() {
+  local kname=accessgateway-e2e-kuma kvol=accessgateway-e2e-kuma-data old_pw tok out r
+  local gw_net=(--network container:accessgateway-e2e-caddy)
+  rnd() { head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c "$1"; }
+  docker rm -f "$kname" > /dev/null 2>&1 || true; docker volume rm "$kvol" > /dev/null 2>&1 || true
+  docker image inspect "$KUMA_IMAGE" > /dev/null 2>&1 || docker pull -q "$KUMA_IMAGE" > /dev/null
+  MSYS_NO_PATHCONV=1 docker run -d --name "$kname" "${gw_net[@]}" -v "$kvol:/app/data" "$KUMA_IMAGE" \
+    sh -c 'printf "{\"type\":\"sqlite\"}" > /app/data/db-config.json && exec node server/server.js' > /dev/null
+  for _ in $(seq 1 120); do MSYS_NO_PATHCONV=1 docker exec "$kname" extra/healthcheck > /dev/null 2>&1 && break; sleep 1; done
+  old_pw="Antiga-$(rnd 20)"; tok=$(rnd 32)
+  printf '%s\n' "$tok" > "$TMP/e2e/kuma-push-token"; printf 'Nova-%s\n' "$(rnd 24)" > "$TMP/e2e/kuma-admin-pw"
+  out=$(printf '%s\n%s\n%s\n' "$old_pw" "$(rnd 32)" "$tok" | MSYS_NO_PATHCONV=1 docker exec -i "$kname" node -e "$(cat tests/uptime-kuma/kuma-sandbox.js)" seed 2>&1 || true)
+  if [[ "$out" != *"seed=ok"* ]]; then bad "Kuma do e2e: semeadura falhou ($out)"; docker rm -f "$kname" > /dev/null; docker volume rm "$kvol" > /dev/null; return; fi
+  ok "Kuma descartável no e2e (imagem de produção) semeado com disableAuth=true, atrás do Caddy de teste"
+
+  local gw=("${tester[@]}" bash /repo/tests/uptime-kuma/kuma-gateway-test.sh)
+  if "${gw[@]}" alias > "$TMP/kuma-gw-alias.out" 2>&1; then
+    ok "kuma.home com o Kuma ainda exposto: o gateway sozinho só entrega o push ($(grep -c '^\[PASS\]' "$TMP/kuma-gw-alias.out") verificações)"
+  else
+    bad "kuma.home (Kuma exposto): $(grep -E '^\[FAIL\]' "$TMP/kuma-gw-alias.out" | head -6)"
+  fi
+
+  printf '#!/bin/sh\necho "[PASS] Kuma         /var/backups/home-server/current/sqlite/uptime-kuma/kuma.db"\n' > "$TMP/kuma-cov.sh"
+  if MSYS_NO_PATHCONV=1 ALLOW_NON_ROOT=1 KUMA_CONTAINER="$kname" KUMA_EXPECTED_IMAGE="$(docker image inspect -f '{{.Id}}' "$KUMA_IMAGE")" \
+       KUMA_COVERAGE_CMD="$TMP/kuma-cov.sh" KUMA_BACKUPS="$TMP/kuma-backups" GATEWAY_ROOT="$TMP/e2e" \
+       KUMA_ADMIN_PASSWORD_FILE="$TMP/e2e/kuma-admin-pw" bash infra/uptime-kuma/kuma-auth.sh --apply > "$TMP/kuma-gw-apply.out" 2>&1; then
+    ok "kuma-auth.sh --apply no Kuma atrás do gateway"
+  else
+    bad "kuma-auth.sh --apply (e2e): $(grep -E 'FALHA|ERRO' "$TMP/kuma-gw-apply.out" | head -4)"
+  fi
+  if "${gw[@]}" alias > "$TMP/kuma-gw-alias2.out" 2>&1; then
+    ok "kuma.home depois do --apply: push pelo gateway continua funcionando; o resto segue fechado"
+  else
+    bad "kuma.home após o apply: $(grep -E '^\[FAIL\]' "$TMP/kuma-gw-alias2.out" | head -6)"
+  fi
+
+  # A verificação externa usada na implantação (validate-green: classes de tests/routes.tsv + contorno por normalização)
+  if "${tester[@]}" bash /repo/scripts/validate-green.sh --https-port 18443 --http-port 18080 --blue-https-port 18443 \
+       > "$TMP/kuma-gw-validate-green.out" 2>&1; then
+    ok "validate-green no e2e: $(tail -1 "$TMP/kuma-gw-validate-green.out") (inclui as rotas novas do kuma.home)"
+  else
+    bad "validate-green no e2e: $(grep -E '^\[FAIL\]' "$TMP/kuma-gw-validate-green.out" | head -6)"
+  fi
+
+  local sock=(docker run --rm "${gw_net[@]}" -v "$root:/e2e:ro" "$KUMA_IMAGE" node -e "$(cat tests/uptime-kuma/kuma-gateway-socket.js)")
+  for step_ in "session:gw" "sessao:sock" "logout:gw" "sem-sessao:sock"; do
+    if [ "${step_#*:}" = gw ]; then
+      "${gw[@]}" "${step_%%:*}" > "$TMP/kuma-gw-${step_%%:*}.out" 2>&1 && r=0 || r=$?
+    else
+      MSYS_NO_PATHCONV=1 "${sock[@]}" "${step_%%:*}" > "$TMP/kuma-gw-${step_%%:*}.out" 2>&1 && r=0 || r=$?
+      if [ "${step_%%:*}" = sem-sessao ]; then   # de novo, com o cookie revogado pelo logout
+        MSYS_NO_PATHCONV=1 docker run --rm "${gw_net[@]}" -v "$root:/e2e:ro" -e REVOKED=1 "$KUMA_IMAGE" \
+          node -e "$(cat tests/uptime-kuma/kuma-gateway-socket.js)" sem-sessao >> "$TMP/kuma-gw-${step_%%:*}.out" 2>&1 || r=1
+      fi
+    fi
+    if [ "$r" = 0 ]; then
+      ok "Kuma pelo gateway ($step_): $(grep '^\[PASS\]' "$TMP/kuma-gw-${step_%%:*}.out" | sed 's/^\[PASS\] //' | paste -sd';' - | cut -c1-230)"
+    else
+      bad "Kuma pelo gateway ($step_): $(grep -E '^\[FAIL\]' "$TMP/kuma-gw-${step_%%:*}.out" | head -4 || true) $(grep -v '^\[PASS\]' "$TMP/kuma-gw-${step_%%:*}.out" | tail -3)"
+    fi
+  done
+
+  printf '%s\n' "$old_pw" "$tok" > "$TMP/kuma-segredos.pat"; head -1 "$TMP/e2e/kuma-admin-pw" >> "$TMP/kuma-segredos.pat"
+  docker logs "$kname" > "$TMP/kuma-e2e.log" 2>&1
+  if grep -qFf "$TMP/kuma-segredos.pat" "$TMP/kuma-e2e.log" "$TMP"/kuma-gw-*.out; then bad "segredo do Kuma de teste em log ou saída"
+  else ok "logs do Kuma e saídas sem senhas nem token de push"; fi
+  docker rm -f "$kname" > /dev/null; docker volume rm "$kvol" > /dev/null
+  rm -f "$TMP/e2e/kuma-admin-pw" "$TMP/e2e/kuma-push-token" "$TMP/e2e/kuma-admin.jar" "$TMP/kuma-segredos.pat"
 }
 
 check_e2e() {
@@ -273,6 +362,7 @@ check_e2e() {
       bad "$name: $(grep -E '^\[FAIL\]|ERRO' "$TMP/$name.out" | head -6)"
     fi
   done
+  e2e_kuma
   cat "$TMP/e2e/green-test-user.password" "$TMP/e2e/green-test-admin.password" > "$TMP/senhas.pat" 2>/dev/null || true
   if [ -s "$TMP/senhas.pat" ] && grep -qFf "$TMP/senhas.pat" -- "$TMP"/*.out; then
     bad "senha de usuário de teste apareceu na saída"
@@ -389,6 +479,15 @@ assert "<CA>" in [v["source"] for v in b["services"]["uptime-kuma"]["volumes"]]
   fi
 }
 
+check_kumaauth() {
+  step "Autenticação do Uptime Kuma (T07.6.1): kuma-auth.sh num Kuma descartável, sem rede, credenciais fictícias"
+  if bash tests/uptime-kuma/kuma-auth-test.sh > "$TMP/kumaauth.out" 2>&1; then
+    ok "kuma-auth: $(tail -1 "$TMP/kumaauth.out")"
+  else
+    bad "kuma-auth: $(grep -E '^\[FAIL\]' "$TMP/kumaauth.out" | head -8) $(tail -2 "$TMP/kumaauth.out")"
+  fi
+}
+
 check_restoredrill() {
   step "Ensaio de restauração (T07.7): override de isolamento com uma instância real e segredos fictícios"
   [ -d "$TMP/secrets" ] || dummy_secrets
@@ -444,7 +543,7 @@ check_lint() {
       tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh infra/home-smoke-test/smoke-paths.sh \
       tests/status-dashboard/*.sh tests/status-dashboard/stubs/* tests/public-ca/*.sh \
       tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh tests/ca-distribute/*.sh \
-      infra/home-server-backup/install-conf.sh infra/uptime-kuma/kuma-ca-migrate.sh tests/uptime-kuma/*.sh tests/uptime-kuma/stubs/* \
+      infra/home-server-backup/install-conf.sh infra/uptime-kuma/kuma-ca-migrate.sh infra/uptime-kuma/kuma-auth.sh tests/uptime-kuma/*.sh tests/uptime-kuma/stubs/* \
       infra/restore-drill/restore-drill.sh \
       tests/deploy-homeautomation/*.sh infra/deploy-homeautomation/install.sh \
       infra/accessgateway-status-sync/accessgateway-status-sync infra/accessgateway-status-sync/install.sh \
@@ -476,7 +575,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies cadistribute kuma restoredrill lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies cadistribute kuma kumaauth restoredrill lint}"; do
   for s in $section; do "check_$s"; done
 done
 

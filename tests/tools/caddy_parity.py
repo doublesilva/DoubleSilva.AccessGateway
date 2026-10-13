@@ -13,6 +13,8 @@ Normalizações (as únicas diferenças permitidas entre Blue e Green):
     admin.home.doublesilva.com:/status e :/status/*) são removidas da Green antes da comparação, e precisam existir;
   - --green-replace NOVO=ANTIGO troca textos declarados na Green antes da comparação (ex.: a raiz do cert.home,
     /config/public-certs na Green desde a T07.4 e /config/casa-dashboard na Blue);
+  - hosts declarados com --diverge-host HOST (ex.: kuma.home, T07.6.1) têm a rota de nível superior removida dos
+    DOIS lados antes da comparação (precisa existir na Green); o conteúdo desses hosts é testado à parte;
   - nomes de grupos ("group18") são renumerados pela ordem de aparição (a rota extra desloca a numeração).
 Sai com código 0 se forem equivalentes; caso contrário imprime as diferenças e sai com 1.
 """
@@ -74,6 +76,21 @@ def remove_green_only(config, only):
     return removed
 
 
+def remove_hosts(config, hosts):
+    """Remove as rotas de nível superior cujo match de host é exatamente um dos HOSTS. Devolve os encontrados."""
+    found = set()
+    for srv in config.get("apps", {}).get("http", {}).get("servers", {}).values():
+        kept = []
+        for r in srv.get("routes", []):
+            route_hosts = {h for m in r.get("match", []) or [] for h in m.get("host", [])}
+            if len(route_hosts) == 1 and route_hosts <= hosts:
+                found |= route_hosts
+                continue
+            kept.append(r)
+        srv["routes"] = kept
+    return found
+
+
 def renumber_groups(node, mapping=None):
     mapping = {} if mapping is None else mapping
     if isinstance(node, dict):
@@ -117,6 +134,7 @@ def main():
     parser.add_argument("--green-authelia", default="127.0.0.1:19091")
     parser.add_argument("--green-only", action="append", default=[], metavar="HOST:CAMINHO")
     parser.add_argument("--green-replace", action="append", default=[], metavar="NOVO=ANTIGO")
+    parser.add_argument("--diverge-host", action="append", default=[], metavar="HOST")
     args = parser.parse_args()
 
     with open(args.blue, encoding="utf-8") as f:
@@ -136,6 +154,12 @@ def main():
     removed = remove_green_only(green, only)
     if removed != only:
         print(f"DIFERENTE: rotas exclusivas da Green ausentes: {sorted(only - removed)}")
+        return 1
+    diverge = set(args.diverge_host)
+    remove_hosts(blue, diverge)
+    found = remove_hosts(green, diverge)
+    if found != diverge:
+        print(f"DIFERENTE: hosts divergentes declarados ausentes da Green: {sorted(diverge - found)}")
         return 1
     blue, green = renumber_groups(blue), renumber_groups(green)
 

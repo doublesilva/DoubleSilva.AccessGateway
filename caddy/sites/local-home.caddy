@@ -1,11 +1,29 @@
 # Hosts locais *.home (reescritas explícitas no AdGuard → 192.168.0.162).
 # Mesma ordem da Blue, para que o JSON adaptado seja idêntico.
 # Paridade com a Blue: estes aliases não passam pelo Authelia (achado de segurança registrado no inventário).
+# Exceção: kuma.home (T07.6.1, fora da paridade).
 
+# T07.6.1: o alias só entrega o push dos monitores (home-smoke-publish usa https://kuma.home/api/push/<token>).
+# Interface, Socket.IO, /metrics, badges e status pages → 301 para kuma.home.doublesilva.com (forward_auth home-admin).
 kuma.home {
 	tls internal
 
-	reverse_proxy 127.0.0.1:3001
+	# path_regexp casa com o caminho NORMALIZADO, mas o upstream recebe o caminho CRU: "/socket.io/../api/push/x" casaria
+	# e chegaria ao engine.io do Kuma (handshake administrativo). Por isso o caminho cru também tem de ser exatamente
+	# /api/push/<token>, com um charset sem ".", "%" ou "/" (tokens do Kuma são alfanuméricos).
+	@push {
+		method GET POST
+		path_regexp ^/api/push/[A-Za-z0-9_-]+$
+		expression {http.request.uri.path}.matches("^/api/push/[A-Za-z0-9_-]+$")
+	}
+
+	handle @push {
+		reverse_proxy 127.0.0.1:3001
+	}
+
+	handle {
+		redir https://kuma.home.doublesilva.com{uri} permanent
+	}
 }
 
 frigate.home {

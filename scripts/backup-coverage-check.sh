@@ -46,6 +46,11 @@ need "Segredos"    /etc/jarvis/secrets/homeautomation-client-secret
 need "Bancos"      "$S/authelia/db.sqlite3"
 need "Bancos"      "$S/homeautomation-api/homeautomation.db"
 need "Bancos"      "$S/home-events/home-events.db"
+# Uptime Kuma (T07.6.1): banco por snapshot, compose e URLs dos pushes (só nomes; o conteúdo nunca é lido aqui)
+need "Kuma"        "$S/uptime-kuma/kuma.db"
+need "Kuma"        /home/diego/containers/uptime-kuma/compose.yaml
+need "Kuma"        /root/.uptime-kuma-backup-push.conf
+need "Kuma"        /etc/home-smoke-test/kuma-push-url
 need "Green"       /srv/accessgateway/accessgateway.env opcional
 need "Green"       /srv/accessgateway/secrets/authelia/oidc/jwks-rsa.key opcional
 need "Green"       /srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.key opcional
