@@ -10,10 +10,11 @@
 #   5. authelia validate-config com segredos fictícios;
 #   6. docker compose config nos dois modos;
 #   7. teste de consistência do snapshot SQLite sob escrita concorrente;
-#   8. shellcheck dos scripts e varredura de segredos (gitleaks).
+#   8. shellcheck dos scripts e varredura de segredos (gitleaks);
+#   9. LLDAP no perfil "lldap" (T09.3.6): compose real, backup, restauração isolada e fail-closed da seed.
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lldap lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -176,6 +177,22 @@ check_compose() {
     ok "padrões sem arquivo de ambiente = modo preparação"
   else
     bad "padrões do compose sem arquivo de ambiente não são os da preparação"
+  fi
+  # T09.3.6: o LLDAP só existe no perfil "lldap" (a checagem acima já exige que ele não apareça no render normal).
+  docker compose --env-file env/prep.env.example -f compose.yml --profile lldap config --format json > "$TMP/compose-lldap.json" 2>/dev/null
+  if py tests/tools/compose_check.py "$TMP/compose-lldap.json" --expect-lldap; then
+    ok "perfil lldap: sem portas, unless-stopped, healthcheck, config ro, segredos só por arquivo, cap_drop ALL; fora do deploy normal"
+  else
+    bad "serviço lldap fora das regras"
+  fi
+}
+
+check_lldap() {
+  step "LLDAP (T09.3.6): compose real no perfil lldap, backup, restauração isolada, fail-closed da seed, provisionamento"
+  if tests/lldap/lldap-test.sh > "$TMP/lldap.out" 2>&1; then
+    ok "$(tail -1 "$TMP/lldap.out")"
+  else
+    bad "LLDAP: $(grep -E '^\[FAIL\]' "$TMP/lldap.out" | head -5) $(tail -1 "$TMP/lldap.out")"
   fi
 }
 
@@ -608,7 +625,7 @@ check_lint() {
       -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh \
       tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh infra/home-smoke-test/smoke-paths.sh \
       tests/status-dashboard/*.sh tests/status-dashboard/stubs/* tests/public-ca/*.sh \
-      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh tests/backup-coverage/*.sh tests/ca-distribute/*.sh \
+      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh tests/backup-coverage/*.sh tests/ca-distribute/*.sh tests/lldap/*.sh \
       infra/home-server-backup/install-conf.sh infra/uptime-kuma/kuma-ca-migrate.sh infra/uptime-kuma/kuma-auth.sh tests/uptime-kuma/*.sh tests/uptime-kuma/stubs/* \
       infra/restore-drill/restore-drill.sh \
       tests/deploy-homeautomation/*.sh infra/deploy-homeautomation/install.sh \
@@ -641,7 +658,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lldap lint}"; do
   for s in $section; do "check_$s"; done
 done
 

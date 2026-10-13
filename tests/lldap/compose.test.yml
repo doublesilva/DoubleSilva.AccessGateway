@@ -1,0 +1,16 @@
+# Override SOMENTE para tests/lldap/lldap-test.sh (T09.3.6), aplicado sobre o compose.yml real com --profile lldap:
+#   - projeto e container próprios (nunca accessgateway-lldap);
+#   - rede interna, sem saída; nenhuma porta publicada (como no compose.yml).
+# Só o serviço lldap é iniciado; GATEWAY_ROOT aponta para um diretório temporário com segredos fictícios.
+name: agldaptest
+
+services:
+  lldap:
+    container_name: agldaptest-lldap
+    networks:
+      - internal
+
+networks:
+  internal:
+    name: agldaptest_internal
+    internal: true

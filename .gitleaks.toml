@@ -4,3 +4,6 @@ useDefault = true
 [allowlist]
 description = "Saídas temporárias de scripts/validate-local.sh (segredos fictícios, ignorados pelo Git e apagados ao final)"
 paths = ['''(^|/)\.tmp/''']
+# Senha FICTÍCIA do teste que prova que mensagens de erro não repetem o valor (T09.3.2,
+# tests/AccessGateway.Users.Tests/UsersDatabaseParseTests.cs; já no histórico desde a804aa8). Só este literal.
+regexes = ['''MinhaSenhaSecreta123''']

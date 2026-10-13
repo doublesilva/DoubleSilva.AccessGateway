@@ -13,6 +13,7 @@ segue Blue/Green, documentada em `docs/`.
 | `compose.yml`, `env/` | Green: `accessgateway-caddy` + `accessgateway-authelia`; ambientes de preparação e cutover |
 | `caddy/` | Caddyfile parametrizado, snippets e sites (paridade 1:1 com a Blue) |
 | `authelia/` | `configuration.yml` (template; segredos por arquivo) |
+| `lldap/` | `lldap_config.toml` do LLDAP preparado no perfil `lldap` do compose, fora do deploy normal (T09.3.6) |
 | `scripts/` | Provisionamento, snapshot do SQLite, deploy, validação, paridade, rollback, cópia da CA, inventário |
 | `src/` | Núcleo .NET 10 de gerenciamento de usuários do Authelia (`AccessGateway.Users`; ver T09.3.2) |
 | `tests/` | Baselines da Blue, comparadores e testes (snapshot, CA, ponta a ponta) |

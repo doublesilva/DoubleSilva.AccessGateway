@@ -1,0 +1,28 @@
+# AccessGateway — LLDAP (T09.3.6). Montado somente leitura em /config/lldap_config.toml.
+#
+# Nenhum segredo neste arquivo. Os segredos vêm de arquivos em ${GATEWAY_ROOT}/secrets/lldap (dono 1000:1000, 400),
+# lidos pelo próprio LLDAP por LLDAP_KEY_SEED_FILE, LLDAP_JWT_SECRET_FILE e LLDAP_LDAP_USER_PASS_FILE (compose.yml).
+#
+# Fail-closed da chave do servidor: sem key_seed aqui e com key_file vazio, o LLDAP SÓ inicia se LLDAP_KEY_SEED_FILE
+# existir. Sem isso, a imagem usaria o key_seed público do template ("RanD0m STR1ng") na primeira partida (T09.3.6).
+# Trocar a seed depois invalida todas as senhas; o LLDAP recusa iniciar com outra chave (T09.3.5).
+#
+# O template da imagem ainda é copiado para /data/lldap_config.toml pelo entrypoint, mas NÃO é usado (o comando
+# aponta para este arquivo).
+
+## Base da árvore LDAP. Definida antes da primeira partida; trocar depois exige migrar o diretório.
+ldap_base_dn = "dc=home,dc=doublesilva,dc=com"
+
+## Usuário administrador criado na primeira partida (senha: LLDAP_LDAP_USER_PASS_FILE).
+ldap_user_dn = "admin"
+ldap_user_email = "admin@home.doublesilva.com"
+
+## Portas internas (nenhuma é publicada; acesso só pela rede do compose).
+ldap_port = 3890
+http_port = 17170
+
+## Banco SQLite no volume persistente (/data = ${GATEWAY_ROOT}/data/lldap).
+database_url = "sqlite:///data/users.db?mode=rwc"
+
+## Chave do servidor: somente pela seed em arquivo (ver acima). Vazio desativa o key_file gerado ao acaso.
+key_file = ""
