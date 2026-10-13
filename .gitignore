@@ -13,3 +13,8 @@ secrets/
 
 # Saídas temporárias das validações locais
 .tmp/
+
+# Saídas de build .NET
+bin/
+obj/
+TestResults/

@@ -14,6 +14,7 @@ segue Blue/Green, documentada em `docs/`.
 | `caddy/` | Caddyfile parametrizado, snippets e sites (paridade 1:1 com a Blue) |
 | `authelia/` | `configuration.yml` (template; segredos por arquivo) |
 | `scripts/` | Provisionamento, snapshot do SQLite, deploy, validação, paridade, rollback, cópia da CA, inventário |
+| `src/` | Núcleo .NET 10 de gerenciamento de usuários do Authelia (`AccessGateway.Users`; ver T09.3.2) |
 | `tests/` | Baselines da Blue, comparadores e testes (snapshot, CA, ponta a ponta) |
 | `docs/` | Inventário, plano, propostas, relatórios e runbooks |
 
@@ -23,6 +24,7 @@ Requer Docker. Não acessa o servidor; usa segredos fictícios em `.tmp/`, apaga
 
 ```sh
 scripts/validate-local.sh          # caddy authelia compose snapshot ca e2e lint
+dotnet test AccessGateway.slnx     # núcleo de usuários (.NET 10)
 ```
 
 ## Documentação
