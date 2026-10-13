@@ -7,6 +7,9 @@
 #
 #   rollback.sh --cutover --yes  [--plan]
 #       Reverte um cutover (T04), em qualquer ponto da virada:
+#         0. (R2.1) recusa se a Blue foi removida (R4) ou se o Caddyfile da Blue é desconhecido; religa o Authelia da
+#            Blue se estiver parado (R2) e espera healthy; instala infra/blue-rollback/Caddyfile (kuma.home só push,
+#            como na Green: o Kuma não tem login próprio) guardando o original. Tudo isso antes de parar a Green;
 #         1. para o Caddy da Green (libera 80/443) e o Authelia da Green;
 #         2. inicia o Caddy da Blue com `docker compose start` (mesmo container e imagem; nunca up/recreate);
 #            se a Blue já estiver atendendo, este passo é pulado;
@@ -30,6 +33,7 @@ for arg in "$@"; do
   case "$arg" in --plan) PLAN=1 ;; --yes) YES=1 ;; *) die "opção inválida: $arg" ;; esac
 done
 WAIT_SECONDS=${WAIT_SECONDS:-60}
+AUTHELIA_WAIT_SECONDS=${AUTHELIA_WAIT_SECONDS:-120}
 
 install -d -m 700 "$GATEWAY_LOG_DIR"
 LOG="$GATEWAY_LOG_DIR/rollback-${MODE#--}-$(date +%Y%m%dT%H%M%S)$([ "$PLAN" = 1 ] && echo -plan || true).log"
@@ -41,6 +45,7 @@ blue_checks() { # valida a Blue na porta 443 das três interfaces
     [ "$(https_code auth.home.doublesilva.com /api/health 443 "$ip")" = 200 ] && log "  Blue: auth /api/health 200 em $ip" || { warn "Blue não responde em $ip"; rc=1; }
   done
   [ "$(https_code kuma.home.doublesilva.com / 443)" = 302 ] && log "  Blue: forward_auth 302 (kuma)" || { warn "forward_auth inesperado"; rc=1; }
+  [ "$(https_code kuma.home /dashboard 443)" = 301 ] && log "  Blue: kuma.home fechado (301; só push)" || { warn "kuma.home da Blue sem o 301 (administração do Kuma exposta?)"; rc=1; }
   [ "$(https_code casa.home / 443)" = 200 ] && log "  Blue: casa.home 200" || { warn "casa.home inesperado"; rc=1; }
   return "$rc"
 }
@@ -65,12 +70,57 @@ case "$MODE" in
   --cutover)
     log "rollback --cutover — log em $LOG"
     OWNER=$(production_owner)
-    log "Dono atual de 80/443: $OWNER"
+    PHASE=$(blue_phase)
+    BLUE_CF="$BLUE_CADDY_DIR/Caddyfile"
+    SAFE_CF="$GATEWAY_APP_DIR/infra/blue-rollback/Caddyfile"
+    cf_sha=$(sha256sum "$BLUE_CF" 2>/dev/null | cut -d' ' -f1 || true)
+    log "Dono atual de 80/443: $OWNER; fase da Blue: $PHASE"
+
+    # R2.1 — pré-condições, ANTES de qualquer alteração (se algo falhar aqui, a Green continua atendendo):
+    [ "$PHASE" != r4 ] || die "Blue removida (R4): o rollback só é possível por restauração do blue-final (R3); nada alterado"
+    container_exists authelia && container_exists caddy || die "Blue incompleta ($PHASE); nada alterado"
+    # O Kuma não tem login próprio (SSO só pelo Authelia): a Blue só sobe com o kuma.home fechado (como na Green).
+    case "$cf_sha" in
+      "$BLUE_ROLLBACK_CADDYFILE_SHA256") CF_ACTION="Caddyfile da Blue já com o kuma.home fechado" ;;
+      "$BLUE_CADDYFILE_SHA256") CF_ACTION="instalaria infra/blue-rollback/Caddyfile (kuma.home só push) em $BLUE_CF, guardando o original" ;;
+      *) die "Caddyfile da Blue desconhecido (${cf_sha:0:12}…): não há garantia do kuma.home fechado; nada alterado" ;;
+    esac
+    [ "$(sha256sum "$SAFE_CF" 2>/dev/null | cut -d' ' -f1)" = "$BLUE_ROLLBACK_CADDYFILE_SHA256" ] \
+      || die "$SAFE_CF ausente ou diferente do esperado; nada alterado"
+
     if [ "$PLAN" = 1 ]; then
-      log "PLAN: pararia $GREEN_CADDY/$GREEN_AUTHELIA; $( [ "$OWNER" = blue ] && echo 'Blue já atende (start pulado)' || echo "docker compose -f $BLUE_CADDY_COMPOSE start caddy" ); restauraria o ambiente de preparação ($( [ -f "$GATEWAY_PREP_ENV_BACKUP" ] && echo presente || echo 'sem cópia: nada a restaurar' )); validaria a Blue em 443."
+      log "PLAN: $(container_running authelia && echo 'Authelia da Blue já em execução' || echo 'religaria o Authelia da Blue (restart=unless-stopped + start) e esperaria healthy'); $CF_ACTION; pararia $GREEN_CADDY/$GREEN_AUTHELIA; $( [ "$OWNER" = blue ] && echo 'Blue já atende (start pulado)' || echo "docker compose -f $BLUE_CADDY_COMPOSE start caddy" ); restauraria o ambiente de preparação ($( [ -f "$GATEWAY_PREP_ENV_BACKUP" ] && echo presente || echo 'sem cópia: nada a restaurar' )); validaria a Blue em 443 (inclui kuma.home 301)."
       exit 0
     fi
     [ "$YES" = 1 ] || die "confirme com: rollback.sh --cutover --yes"
+
+    log "0. Authelia da Blue (antes de parar a Green: nenhum tempo extra fora do ar)..."
+    if container_running authelia; then
+      log "  já em execução"
+    else
+      docker update --restart=unless-stopped authelia > /dev/null
+      docker start authelia > /dev/null
+      log "  religado (restart=unless-stopped)"
+    fi
+    for _ in $(seq 1 "$AUTHELIA_WAIT_SECONDS"); do [ "$(health_status authelia)" = healthy ] && break; sleep 1; done
+    [ "$(health_status authelia)" = healthy ] \
+      || die "Authelia da Blue não ficou healthy em ${AUTHELIA_WAIT_SECONDS} s; a Green continua atendendo (nada mais alterado)"
+    log "  Authelia da Blue healthy"
+
+    log "0b. kuma.home da Blue fechado..."
+    if [ "$cf_sha" = "$BLUE_CADDYFILE_SHA256" ]; then
+      cp -p "$BLUE_CF" "$BLUE_CF.pre-rollback-$(date +%Y%m%dT%H%M%S)"
+      cp "$SAFE_CF" "$BLUE_CF"   # sobrescreve no lugar (mesmo inode, dono e modo): o bind de arquivo do Caddy da Blue vê o novo
+      [ "$(sha256sum "$BLUE_CF" | cut -d' ' -f1)" = "$BLUE_ROLLBACK_CADDYFILE_SHA256" ] || die "falha ao instalar o Caddyfile seguro"
+      log "  Caddyfile seguro instalado (original em $BLUE_CF.pre-rollback-<data>)"
+      if container_running caddy; then   # Blue ainda atendendo (ex.: rollback automático no meio do cutover)
+        docker exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null \
+          || die "reload do Caddy da Blue recusado; o kuma.home da Blue pode seguir aberto — intervenção manual"
+        log "  Caddy da Blue em execução: configuração recarregada (kuma.home fechado)"
+      fi
+    else
+      log "  já instalado"
+    fi
 
     log "1. Parando a Green..."
     docker stop "$GREEN_CADDY" >/dev/null 2>&1 && log "  $GREEN_CADDY parado" || log "  $GREEN_CADDY já parado"

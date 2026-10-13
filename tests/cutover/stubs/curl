@@ -21,7 +21,10 @@ else
     if run accessgateway-caddy && [ "$(cat "$S/green_port" 2>/dev/null)" = 443 ] && [ "${FAIL_GREEN_HTTP:-0}" != 1 ]; then serving=1; fi
   fi
   if [ "$serving" = 1 ]; then
+    # R2.1: kuma.home fechado (301) na Green e na Blue com o Caddyfile de rollback; aberto (200) na Blue de baseline
     case "$url" in
+      https://kuma.home/*)
+        if run caddy && ! grep -q '@push' /opt/caddy/Caddyfile 2>/dev/null; then code=200; else code=301; fi ;;
       */api/health) code=200 ;;
       https://kuma.home.doublesilva.com/*) code=302 ;;
       https://casa.home/*) code=200 ;;

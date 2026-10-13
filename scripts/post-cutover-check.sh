@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verificação pós-cutover (T04.2/T05): a Green atende 80/443 e a produção está saudável. Somente leitura.
-#   - dono de 80/443 = Green; containers da Green saudáveis; Authelia da Blue em execução (rollback disponível);
+#   - dono de 80/443 = Green; containers da Green saudáveis; Blue em standby, parada (R2) ou removida (R4);
 #   - 443 respondendo em 127.0.0.1, IP da LAN e IP do Tailscale; HTTP→HTTPS em 80;
 #   - validate-green.sh (rotas, TLS, OIDC) e cert-check.sh em 443;
 #   - clients OIDC e tokens aceitos pela API;
@@ -24,8 +24,15 @@ step "Estado"
 owner=$(production_owner)
 [ "$owner" = green ] && ok "Green atende 80/443" || bad "dono de 80/443: $owner"
 [ "$(docker inspect "$GREEN_AUTHELIA" --format '{{.State.Health.Status}}' 2>/dev/null)" = healthy ] && ok "Authelia da Green healthy" || bad "Authelia da Green não está healthy"
-container_running authelia && ok "Authelia da Blue em execução (rollback disponível)" || bad "Authelia da Blue parado"
-container_running caddy && bad "Caddy da Blue em execução (conflito)" || ok "Caddy da Blue parado"
+# R2.1: a Blue tem três estados válidos depois do cutover; qualquer outra combinação reprova.
+phase=$(blue_phase)
+case "$phase" in
+  standby) ok "Blue em standby: Authelia ativo e saudável, Caddy parado (rollback imediato: rollback.sh --cutover)" ;;
+  r2)      ok "Blue parada (R2): Authelia e Caddy parados, restart=no (rollback.sh --cutover religa o Authelia antes)" ;;
+  r4)      ok "Blue removida (R4): rollback só por restauração do blue-final (R3)" ;;
+  *)       bad "Blue em estado inconsistente: ${phase#inconsistente:}" ;;
+esac
+container_running caddy && bad "Caddy da Blue em execução (conflito)" || ok "Caddy da Blue fora de 80/443 (parado ou removido)"
 
 step "Interfaces"
 for ip in 127.0.0.1 "$LAN_IP" "$TAILSCALE_IP"; do

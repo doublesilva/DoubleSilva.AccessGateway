@@ -80,6 +80,16 @@ for s in c["apps"]["http"]["servers"].values():
 json.dump(c, open(".tmp/validate/green-sem-expression.json", "w"))'
   if out=$(py tests/tools/kuma_alias_check.py "$TMP/green-sem-expression.json"); then bad "kuma_alias_check aceitou o alias sem o matcher do caminho cru"
   else ok "kuma_alias_check recusa o alias sem o matcher do caminho cru (contorno por normalização)"; fi
+  # R2.1: Caddyfile de rollback da Blue = baseline com o kuma.home fechado (contrato do alias; resto idêntico à Blue)
+  if docker run --rm --network none -v "$REPO/infra/blue-rollback:/b:ro" "$CADDY_IMAGE" \
+       caddy adapt --config /b/Caddyfile --adapter caddyfile --validate > "$TMP/blue-rollback.json" 2>"$TMP/blue-rollback.err" \
+     && out=$(py tests/tools/kuma_alias_check.py "$TMP/blue-rollback.json") \
+     && py tests/tools/caddy_parity.py "$TMP/blue.json" "$TMP/blue-rollback.json" --blue-authelia 127.0.0.1:9091 \
+          --green-authelia 127.0.0.1:9091 --diverge-host kuma.home > "$TMP/blue-rollback.parity" 2>&1; then
+    ok "Caddyfile de rollback da Blue: válido, kuma.home só push + 301, demais rotas idênticas à Blue"
+  else
+    bad "Caddyfile de rollback da Blue: $(tail -2 "$TMP/blue-rollback.err") ${out:-} $(tail -3 "$TMP/blue-rollback.parity" 2>/dev/null)"
+  fi
   # Revert seguro (caddy-reload --revert): alias no contrato é mantido; alias aberto (Blue/fa0242e) vira só 301
   if out=$(py tests/tools/kuma_alias_check.py --close-if-open "$TMP/green-prod.json" "$TMP/rv-green.json") && [[ "$out" == *mantido* ]] \
      && py -c 'import json,sys; a,b=(json.load(open(f"/repo/.tmp/validate/{n}")) for n in ("green-prod.json","rv-green.json")); sys.exit(a!=b)'; then

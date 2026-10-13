@@ -146,6 +146,8 @@ export FAIL_AUTHELIA=1
 if $CUT --kuma-token-rotated --yes > /tmp/t10.log 2>&1; then bad "falha na E6 deveria terminar com erro"; else ok "falha na E6 detectada"; fi
 check "E6: Blue nunca foi parada" bash -c "! grep -q 'compose -f /opt/caddy/compose.yml stop caddy' $STUB_STATE/calls.log"
 check "E6: Blue dona de 80/443; ambiente prep restaurado" bash -c "[ \"\$(sed -n 's/^GATEWAY_MODE=//p' $R/accessgateway.env)\" = prep ]"
+check "E6 (R2.1): Blue já em execução — kuma.home fechado no lugar e Caddy da Blue recarregado" bash -c \
+  "grep -q 'docker exec caddy caddy reload --config /etc/caddy/Caddyfile' $STUB_STATE/calls.log && grep -q '@push' /opt/caddy/Caddyfile"
 unset FAIL_AUTHELIA
 
 # 11. --no-auto-rollback: falha mantém o estado para o operador
@@ -234,6 +236,69 @@ setup
 before=$(changes)
 check "rollback --cutover --plan" $RB --cutover --plan
 check "rollback --plan: nenhuma operação" test "$(changes)" -eq "$before"
+
+# 19. R2.1 — fases da Blue (standby | r2 | r4) e rollback que religa o Authelia da Blue e fecha o kuma.home
+S=$STUB_STATE
+phase() { STUB_STATE=$S bash -c '. /repo/scripts/lib/common.sh; blue_phase'; }
+green_prod() { # produção depois do cutover: Green em 443, Caddy da Blue parado (restart=no), Authelia da Blue em standby
+  setup; rm -f "$S/running/caddy"; echo 443 > "$S/green_port"; mkdir -p "$S/restart"; echo no > "$S/restart/caddy"
+  install -m 600 "$R/app/env/prep.env.example" "$GATEWAY_PREP_ENV_BACKUP" 2>/dev/null || true
+}
+r2_state() { green_prod; rm -f "$S/running/authelia"; echo no > "$S/restart/authelia"; }
+GATEWAY_PREP_ENV_BACKUP=$R/accessgateway.prep.env
+SAFE=$(sha256sum /repo/infra/blue-rollback/Caddyfile | cut -d' ' -f1)
+
+green_prod; check "fase: standby (Authelia ativo, Caddy parado restart=no)" test "$(phase)" = standby
+r2_state;   check "fase: r2 (Authelia e Caddy parados, restart=no)" test "$(phase)" = r2
+r2_state; touch "$S/running/authelia"
+check "fase: Authelia religado depois da R2 (restart=no) = inconsistente" bash -c "[[ \"$(phase)\" == inconsistente:*religado* ]]"
+green_prod; rm -f "$S/running/authelia"
+check "fase: Authelia parado sem a R2 (restart=unless-stopped) = inconsistente" bash -c "[[ \"$(phase)\" == inconsistente:*fora\ da\ R2* ]]"
+green_prod; touch "$S/unhealthy/authelia" 2>/dev/null || { mkdir -p "$S/unhealthy"; touch "$S/unhealthy/authelia"; }
+check "fase: Authelia em execução sem healthy = inconsistente" bash -c "[[ \"$(phase)\" == inconsistente:*healthy* ]]"
+green_prod; rm -f "$S/known/caddy" "$S/known/authelia" "$S/running/authelia"
+check "fase: r4 (containers removidos)" test "$(phase)" = r4
+green_prod; rm -f "$S/known/caddy"
+check "fase: remoção parcial = inconsistente" bash -c "[[ \"$(phase)\" == inconsistente:*parcial* ]]"
+check "post-cutover-check: os três estados com mensagem própria e o resto reprova" bash -c \
+  "grep -q 'standby) ok' /repo/scripts/post-cutover-check.sh && grep -q 'r2)      ok' /repo/scripts/post-cutover-check.sh && grep -q 'r4)      ok' /repo/scripts/post-cutover-check.sh && grep -q 'bad \"Blue em estado inconsistente' /repo/scripts/post-cutover-check.sh"
+
+# rollback a partir da R2
+r2_state; before_cf=$(sha256sum /opt/caddy/Caddyfile | cut -d' ' -f1)
+check "rollback --plan (R2): anuncia religar o Authelia e fechar o kuma.home, sem alterar nada" bash -c \
+  "$RB --cutover --plan > /tmp/t19p.log 2>&1 && grep -q 'religaria o Authelia da Blue' /tmp/t19p.log && grep -q 'instalaria infra/blue-rollback/Caddyfile' /tmp/t19p.log && [ \"\$(sha256sum /opt/caddy/Caddyfile | cut -d' ' -f1)\" = $before_cf ] && [ ! -e $S/running/authelia ]"
+$RB --cutover --yes > /tmp/t19.log 2>&1 && rc=0 || rc=$?
+check "rollback (R2): concluído" bash -c "[ $rc -eq 0 ] && grep -q 'Rollback concluído' /tmp/t19.log"
+check "rollback (R2): Authelia da Blue religado, restart=unless-stopped, healthy" bash -c \
+  "[ -e $S/running/authelia ] && [ \"\$(cat $S/restart/authelia)\" = unless-stopped ] && grep -q 'Authelia da Blue healthy' /tmp/t19.log"
+check "rollback (R2): Authelia religado ANTES de parar a Green" bash -c \
+  "a=\$(grep -n 'docker start authelia' $S/calls.log | head -1 | cut -d: -f1); g=\$(grep -n 'docker stop accessgateway-caddy' $S/calls.log | head -1 | cut -d: -f1); [ -n \"\$a\" ] && [ -n \"\$g\" ] && [ \$a -lt \$g ]"
+check "rollback (R2): Caddyfile da Blue com o kuma.home fechado antes do start; original guardado" bash -c \
+  "[ \"\$(sha256sum /opt/caddy/Caddyfile | cut -d' ' -f1)\" = $SAFE ] && ls /opt/caddy/Caddyfile.pre-rollback-* >/dev/null && cmp -s /opt/caddy/Caddyfile.pre-rollback-* /repo/tests/baseline/blue.Caddyfile"
+check "rollback (R2): Blue dona de 80/443 e kuma.home 301 validado" bash -c "[ \"$(owner)\" = blue ] && grep -q 'kuma.home fechado (301' /tmp/t19.log"
+check "rollback repetido depois do fechamento: idempotente" bash -c "$RB --cutover --yes > /tmp/t19b.log 2>&1 && grep -q 'já instalado' /tmp/t19b.log"
+
+# rollback a partir do standby: Authelia já ativo; kuma.home fechado do mesmo jeito
+green_prod; $RB --cutover --yes > /tmp/t19s.log 2>&1 && rc=0 || rc=$?
+check "rollback (standby): concluído, Authelia não religado, kuma.home fechado" bash -c \
+  "[ $rc -eq 0 ] && ! grep -q 'docker start authelia' $S/calls.log && [ \"\$(sha256sum /opt/caddy/Caddyfile | cut -d' ' -f1)\" = $SAFE ]"
+
+# Authelia da Blue não fica healthy: para antes de tocar na Green
+r2_state; mkdir -p "$S/unhealthy"; touch "$S/unhealthy/authelia"
+AUTHELIA_WAIT_SECONDS=2 $RB --cutover --yes > /tmp/t19u.log 2>&1 && rc=0 || rc=$?
+check "Authelia da Blue sem healthy: rollback interrompido, Green continua dona, Caddyfile intacto" bash -c \
+  "[ $rc -ne 0 ] && grep -q 'não ficou healthy' /tmp/t19u.log && [ \"$(owner)\" = green ] && ! grep -q 'docker stop accessgateway' $S/calls.log && [ \"\$(sha256sum /opt/caddy/Caddyfile | cut -d' ' -f1)\" = $before_cf ]"
+
+# Blue removida (R4): recusa sem alterar nada
+green_prod; rm -f "$S/known/caddy" "$S/known/authelia" "$S/running/authelia"; n0=$(changes)
+$RB --cutover --yes > /tmp/t19r4.log 2>&1 && rc=0 || rc=$?
+check "Blue removida (R4): rollback recusado, nada alterado" bash -c "[ $rc -ne 0 ] && grep -q 'restauração do blue-final' /tmp/t19r4.log && [ \"$(changes)\" -eq $n0 ] && [ \"$(owner)\" = green ]"
+
+# Caddyfile da Blue desconhecido: recusa sem alterar nada (sem garantia do kuma.home fechado)
+r2_state; echo '# manual' >> /opt/caddy/Caddyfile; n0=$(changes)
+$RB --cutover --yes > /tmp/t19x.log 2>&1 && rc=0 || rc=$?
+check "Caddyfile da Blue desconhecido: rollback recusado, Authelia não religado, Green dona" bash -c \
+  "[ $rc -ne 0 ] && grep -q 'Caddyfile da Blue desconhecido' /tmp/t19x.log && [ ! -e $S/running/authelia ] && [ \"$(owner)\" = green ] && [ \"$(changes)\" -eq $n0 ]"
 
 printf '\nRESULTADO: %d PASS, %d FAIL\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

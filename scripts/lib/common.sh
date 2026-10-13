@@ -19,6 +19,8 @@ BLUE_AUTHELIA_CONFIG=$BLUE_AUTHELIA_DIR/config/configuration.yml
 # Baseline coletada na T01/T02 (2026-10-10).
 EXPECTED_ROOT_FP="${ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP:-AD:F8:85:14:FF:96:F1:71:93:E3:84:90:8F:A4:43:42:FE:7F:62:48:53:79:32:14:44:A8:8C:B2:D9:C2:38:56}"
 BLUE_CADDYFILE_SHA256=97138770033ff281944f0dfa32ba6437e97a3ff2184edf37f7bacdd9042a492a # gitleaks:allow (hash público para detectar deriva)
+# R2.1: Caddyfile da Blue com o alias kuma.home fechado (infra/blue-rollback/Caddyfile), instalado pelo rollback --cutover
+BLUE_ROLLBACK_CADDYFILE_SHA256=05782327499dceb9d103461b69ca4cc067ad80d495fb181a2f2be12611238700 # gitleaks:allow (hash público)
 BLUE_AUTHELIA_CONFIG_SHA256="${ACCESSGATEWAY_TEST_BLUE_AUTHELIA_SHA256:-e0d721766e31663a58285916027e1ccecdc385d563e1b9a7b0fe6947c92ec16b}" # gitleaks:allow (hash público para detectar deriva)
 
 OIDC_CLIENTS=(homeautomation-panel homeautomation-outhome jarvis-home saldo360)
@@ -100,6 +102,34 @@ key_matches_cert() {
 }
 
 container_running() { [ "$(docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
+container_exists()  { docker inspect --format '{{.State.Running}}' "$1" > /dev/null 2>&1; }
+restart_policy()    { docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$1" 2>/dev/null; }
+health_status()     { docker inspect --format '{{.State.Health.Status}}' "$1" 2>/dev/null; }
+
+# Fase da Blue depois do cutover (R2.1). Imprime:
+#   standby   Authelia da Blue em execução e saudável, com restart; Caddy da Blue parado com restart=no (R0/R1)
+#   r2        Authelia e Caddy da Blue parados, ambos com restart=no (R2 executada)
+#   r4        containers da Blue removidos (R4)
+#   inconsistente:<motivo>  qualquer outra combinação (ex.: Authelia religado fora do procedimento, parada sem a R2)
+blue_phase() {
+  local ae ce apol cpol
+  container_exists authelia && ae=1 || ae=0
+  container_exists caddy && ce=1 || ce=0
+  [ "$ae$ce" = 00 ] && { echo r4; return; }
+  [ "$ae$ce" = 11 ] || { echo "inconsistente:remoção parcial (authelia=$ae, caddy=$ce)"; return; }
+  container_running caddy && { echo "inconsistente:Caddy da Blue em execução"; return; }
+  cpol=$(restart_policy caddy)
+  [ "$cpol" = no ] || { echo "inconsistente:Caddy da Blue com restart=$cpol (esperado no)"; return; }
+  apol=$(restart_policy authelia)
+  if container_running authelia; then
+    [ "$apol" != no ] || { echo "inconsistente:Authelia da Blue em execução com restart=no (religado fora do procedimento)"; return; }
+    [ "$(health_status authelia)" = healthy ] || { echo "inconsistente:Authelia da Blue em execução sem healthy ($(health_status authelia))"; return; }
+    echo standby
+  else
+    [ "$apol" = no ] || { echo "inconsistente:Authelia da Blue parado com restart=$apol (parada fora da R2)"; return; }
+    echo r2
+  fi
+}
 
 # Sessão tmux/screen real na ancestralidade do processo. Não usa TMUX/STY: o sudo os remove e qualquer um pode
 # defini-los. Sobe a árvore por /proc/<pid>/stat (PPID) e identifica cada processo pelo executável (/proc/<pid>/exe;
@@ -122,8 +152,11 @@ blue_status() {
   local rc=0
   container_running caddy    && log "Blue: container caddy em execução"    || { warn "Blue: container caddy NÃO está em execução"; rc=1; }
   container_running authelia && log "Blue: container authelia em execução" || { warn "Blue: container authelia NÃO está em execução"; rc=1; }
-  [ "$(sha256sum "$BLUE_CADDY_DIR/Caddyfile" | cut -d' ' -f1)" = "$BLUE_CADDYFILE_SHA256" ] \
-    && log "Blue: Caddyfile igual à baseline" || { warn "Blue: Caddyfile difere da baseline (deriva de configuração)"; rc=1; }
+  case "$(sha256sum "$BLUE_CADDY_DIR/Caddyfile" | cut -d' ' -f1)" in
+    "$BLUE_CADDYFILE_SHA256") log "Blue: Caddyfile igual à baseline" ;;
+    "$BLUE_ROLLBACK_CADDYFILE_SHA256") log "Blue: Caddyfile de rollback (baseline com o kuma.home fechado, R2.1)" ;;
+    *) warn "Blue: Caddyfile difere da baseline (deriva de configuração)"; rc=1 ;;
+  esac
   [ "$(sha256sum "$BLUE_AUTHELIA_CONFIG" | cut -d' ' -f1)" = "$BLUE_AUTHELIA_CONFIG_SHA256" ] \
     && log "Blue: configuration.yml igual à baseline" || { warn "Blue: configuration.yml difere da baseline (deriva de configuração)"; rc=1; }
   return "$rc"

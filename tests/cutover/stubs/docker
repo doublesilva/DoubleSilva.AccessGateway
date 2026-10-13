@@ -2,6 +2,8 @@
 # Stub de docker para os testes de cutover/rollback. Estado em $STUB_STATE:
 #   running/<container>    container em execução
 #   green_port             GATEWAY_HTTPS_PORT com que o Caddy da Green foi iniciado
+#   restart/<container>    política de restart (padrão: authelia unless-stopped; demais no)  [R2.1]
+#   unhealthy/<container>  container em execução sem chegar a healthy                         [R2.1]
 # Toda chamada é registrada em $STUB_STATE/calls.log. Falhas simuladas: FAIL_AUTHELIA=1.
 S=${STUB_STATE:?}
 mkdir -p "$S/running"
@@ -15,12 +17,20 @@ case "$1" in
     if [[ "$*" == *".State.Running"* ]]; then
       [ -e "$S/known/$name" ] || [ -e "$S/running/$name" ] || exit 1
       run "$name" && echo true || echo false
+    elif [[ "$*" == *".HostConfig.RestartPolicy.Name"* ]]; then
+      [ -e "$S/known/$name" ] || exit 1
+      if [ -e "$S/restart/$name" ]; then cat "$S/restart/$name"; elif [ "$name" = authelia ]; then echo unless-stopped; else echo no; fi
+    elif [[ "$*" == *".State.Health.Status"* ]]; then
+      [ -e "$S/known/$name" ] || exit 1
+      if run "$name" && [ ! -e "$S/unhealthy/$name" ]; then echo healthy; elif run "$name"; then echo starting; fi
     elif [[ "$*" == *".Config.Env"* ]]; then
       [ "$name" = accessgateway-caddy ] && echo "GATEWAY_HTTPS_PORT=$(cat "$S/green_port" 2>/dev/null)"
     fi
     ;;
   ps) ls "$S/running" ;;
   stop) rm -f "$S/running/$2"; echo "$2" ;;
+  start) [ -e "$S/known/$2" ] || exit 1; touch "$S/running/$2"; echo "$2" ;;
+  update) mkdir -p "$S/restart"; echo "${2#--restart=}" > "$S/restart/$3" ;;
   compose)
     shift
     if [ "$1" = -f ] && [ "$2" = /opt/caddy/compose.yml ]; then
