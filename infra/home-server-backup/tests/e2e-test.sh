@@ -23,9 +23,6 @@ mkdb() { # db modo
   python3 "$SRC/tests/concurrency_helper.py" init "$1" "$2"
 }
 C=/home/diego/containers
-mkdb $C/authelia/config/db.sqlite3 delete
-echo "theme: auto" > $C/authelia/config/configuration.yml
-mkdir -p $C/authelia/secrets/oidc && echo "SEGREDO-FICTICIO-JWT" > $C/authelia/secrets/JWT_SECRET
 mkdb $C/uptime-kuma/data/kuma.db wal
 mkdb $C/homeautomation/infrastructure/frigate/frigate-config/frigate.db wal
 # Regressão: o frigate.db real tem tabelas virtuais vec0 (sqlite-vec), cujo módulo não existe no container.
@@ -47,6 +44,8 @@ head -c 300000 /dev/urandom > $C/homeautomation/infrastructure/frigate/frigate-s
 mkdb $C/homeautomation/infrastructure/api/data/homeautomation.db delete
 mkdir -p $C/adguard/conf $C/adguard/work/data && echo "dns: {}" > $C/adguard/conf/AdGuardHome.yaml && echo x > $C/adguard/work/data/stats.db
 mkdir -p $C/homeautomation/src/obj && echo lixo > $C/homeautomation/src/obj/build.cache && echo tmp > $C/homeautomation/x.tmp
+# Estado da R5b (após a R4): Authelia da Blue já removido; /opt/caddy mantido aqui de propósito para provar que o
+# caminho saiu da configuração (não entra no backup mesmo existindo)
 mkdir -p /opt/caddy/data/caddy/pki/authorities/local /opt/caddy/data/caddy/certificates/local/host
 echo "CHAVE-RAIZ-FICTICIA" > /opt/caddy/data/caddy/pki/authorities/local/root.key
 echo "folha" > /opt/caddy/data/caddy/certificates/local/host/host.crt
@@ -70,6 +69,10 @@ mkdir -p /srv/accessgateway/snapshots/authelia /srv/accessgateway/secrets/authel
 echo "copia-provisionamento" > /srv/accessgateway/snapshots/authelia/authelia-antigo.sqlite3
 echo "banco-substituido" > /srv/accessgateway/data/authelia/db.sqlite3.replaced-20261010T000000
 echo "SEGREDO-FICTICIO-GREEN" > /srv/accessgateway/secrets/authelia/SESSION_SECRET
+# PKI da Green (R5a: a CA interna do backup é a da Green; folhas e locks excluídos)
+mkdir -p /srv/accessgateway/data/caddy/caddy/pki/authorities/local /srv/accessgateway/data/caddy/caddy/certificates/local/host
+echo "CHAVE-RAIZ-FICTICIA-GREEN" > /srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.key
+echo "folha" > /srv/accessgateway/data/caddy/caddy/certificates/local/host/host.crt
 mkdir -p /usr/local/sbin /etc/systemd/system /etc/sudoers.d
 cp "$SRC/backup-home-server" /usr/local/sbin/backup-home-server && chmod 700 /usr/local/sbin/backup-home-server
 
@@ -123,20 +126,22 @@ check "script não para containers" bash -c '! grep -qE "docker (stop|restart|ki
 R ls latest --tag home-server-v2 > /tmp/ls.txt
 has()  { grep -qx "$1" /tmp/ls.txt; }
 hasn() { ! grep -q "$1" /tmp/ls.txt; }
-check "inclui CA (root.key)"                  has /opt/caddy/data/caddy/pki/authorities/local/root.key
+check "inclui CA da Green (root.key)"         has /srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.key
+check "Blue fora do backup (/opt/caddy)"     hasn /opt/caddy
+check "Blue fora do backup (Authelia da Blue)" bash -c '! grep -qE "^/home/diego/containers/authelia|/sqlite/authelia/" /tmp/ls.txt'
 check "inclui segredos das aplicações"        has /etc/jarvis/secrets/openai-api-key
 check "inclui biometria (perfis de voz)"      has /var/lib/docker/volumes/jarvis_jarvis-speaker-data/_data/speaker-profiles.json
 check "inclui biometria (calibração)"         has /srv/jarvis-calibration/enroll/amostra.webm
 check "inclui histórico do portão"            has /mnt/home-events/snapshots/gate/evento-0001.jpg
 check "inclui configuração do AdGuard"        has /home/diego/containers/adguard/conf/AdGuardHome.yaml
-check "inclui snapshots SQLite (8 bancos)"    test "$(grep -c '^/var/backups/home-server/current/sqlite/.*\.\(db\|sqlite3\)$' /tmp/ls.txt)" -eq 8
+check "inclui snapshots SQLite (7 bancos, sem a Blue)"    test "$(grep -c '^/var/backups/home-server/current/sqlite/.*\.\(db\|sqlite3\)$' /tmp/ls.txt)" -eq 7
 check "Green: snapshot do banco ativo incluído" has /var/backups/home-server/current/sqlite/accessgateway-authelia/db.sqlite3
 check "Green: banco ativo excluído (sem duplicação)" bash -c '! grep -qE "^/srv/accessgateway/data/authelia/db\.sqlite3" /tmp/ls.txt'
 check "Green: cópias de provisionamento excluídas" bash -c '! grep -qE "^/srv/accessgateway/snapshots|replaced-" /tmp/ls.txt'
 check "Green: segredos incluídos"             has /srv/accessgateway/secrets/authelia/SESSION_SECRET
 check "exclui gravações de vídeo"             hasn frigate-storage
 check "exclui model_cache"                    hasn model_cache
-check "exclui certificados de folha"          hasn /opt/caddy/data/caddy/certificates
+check "exclui certificados de folha (Green)"  hasn /srv/accessgateway/data/caddy/caddy/certificates
 check "exclui AdGuard work/"                  hasn /home/diego/containers/adguard/work
 check "exclui temporários e build"            bash -c '! grep -qE "\.tmp$|/obj/|voice-debug" /tmp/ls.txt'
 check "exclui bancos vivos (db, -wal, -shm)"  bash -c '! grep -qE "^/home/diego/containers/uptime-kuma/data/kuma\.db|^/mnt/home-events/database/.*\.db$" /tmp/ls.txt'
@@ -145,12 +150,12 @@ check "exclui senha do restic"                hasn /root/.restic-home-server-pas
 # ---------------------------------------------------------------- 3. restauração
 rm -rf /tmp/restore && R restore latest --tag home-server-v2 --target /tmp/restore --quiet
 check "restauração: segredo idêntico"  cmp -s /etc/jarvis/secrets/openai-api-key /tmp/restore/etc/jarvis/secrets/openai-api-key
-check "restauração: CA idêntica"       cmp -s /opt/caddy/data/caddy/pki/authorities/local/root.key /tmp/restore/opt/caddy/data/caddy/pki/authorities/local/root.key
+check "restauração: CA da Green idêntica" cmp -s /srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.key /tmp/restore/srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.key
 ok_db=0
 for f in /tmp/restore/var/backups/home-server/current/sqlite/*/*; do
   python3 "$SRC/tests/concurrency_helper.py" check "$f" >/dev/null && ok_db=$((ok_db + 1))
 done
-check "restauração: 8 bancos íntegros e consistentes (invariante a==b==contador)" test "$ok_db" -eq 8
+check "restauração: 7 bancos íntegros e consistentes (invariante a==b==contador)" test "$ok_db" -eq 7
 check "frigate.db: tabela virtual vec0 e tabela-sombra preservadas no snapshot" python3 -c '
 import sqlite3, sys
 c = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Atualiza /etc/home-server-backup/backup.conf a partir da versão do repositório (T07.5.1: inclui /etc/accessgateway).
+# Atualiza /etc/home-server-backup/backup.conf a partir da versão do repositório (R5b: remove a Blue; T07.5.1: /etc/accessgateway).
 # Não executa backup nem altera timers. O próximo disparo (12:30) já usa o arquivo novo.
 #
 #   install-conf.sh --check    diff instalado → novo (nada é alterado)
@@ -11,7 +11,7 @@ set -Eeuo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/backup.conf"
 DST=${BACKUP_CONF_DST:-/etc/home-server-backup/backup.conf}
-KNOWN_PREVIOUS=a9a100167f87b89a4e9b5fb5dbce2c129a78f4188655c036079e47df2634b4a1 # gitleaks:allow (backup.conf da INFRA-03.1)
+KNOWN_PREVIOUS=4654b8384aecb09b344556412bceb9a98912697519a8359172d946a4c8469d78 # gitleaks:allow (backup.conf da T07.5.1, com a Blue)
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { printf '[%s] ERRO: %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }

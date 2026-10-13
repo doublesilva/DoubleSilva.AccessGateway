@@ -33,7 +33,6 @@ reset() {
 /tmp/c/public/caddy-root.crt|publicada|cert.home
 /tmp/c/ha/caddy-local-root.crt|copia|homeautomation
 /tmp/c/jarvis/caddy-local-root.crt|copia+hash|jarvis
-/tmp/c/blue/root.crt|blue|kuma
 /tmp/c/home/caddy-root.crt|orfa|nenhum
 EOF
 }
@@ -41,7 +40,7 @@ state() { (cd /tmp/c && find . -printf '%P %s %m %T@\n' | sort; find . -type f -
 
 reset
 before=$(state)
-check "todas as cópias íntegras (blue/órfã ausentes = INFO)" bash -c "$CHK --no-http > /tmp/o.log; grep -q 'RESULTADO: 5 PASS, 0 FAIL' /tmp/o.log && grep -q 'INFO.*ausente (blue)' /tmp/o.log"
+check "todas as cópias íntegras (órfã ausente = INFO)" bash -c "$CHK --no-http > /tmp/o.log; grep -q 'RESULTADO: 5 PASS, 0 FAIL' /tmp/o.log && grep -q 'INFO.*ausente (orfa)' /tmp/o.log"
 check "somente leitura: nada alterado" test "$(state)" = "$before"
 check "a chave privada da PKI nunca é lida no relatório" bash -c "! grep -q 'root.key' /tmp/o.log"
 
@@ -55,8 +54,10 @@ reset; rm "/tmp/c/jarvis/$H"
 check "SSL_CERT_DIR sem link de hash: FAIL" bash -c "! $CHK --no-http > /tmp/o.log && grep -q 'link de hash' /tmp/o.log"
 reset; rm /tmp/c/ha/caddy-local-root.crt
 check "cópia de consumidor ausente: FAIL" bash -c "! $CHK --no-http > /tmp/o.log && grep -q 'FAIL.*ha/caddy-local-root.crt: ausente' /tmp/o.log"
-reset; mkdir -p /tmp/c/blue; cp "$K/root.crt" /tmp/c/blue/root.crt
-check "PKI da Blue presente e igual: PASS" bash -c "$CHK --no-http | grep -q 'PASS\] blue /tmp/c/blue/root.crt'"
+# R5a: sem a Blue. O inventário do repositório não tem entradas nem papel da Blue; um papel desconhecido ausente é FAIL
+check "ca/copies.conf do repositório sem a Blue (/opt/caddy, papel blue)" bash -c "! grep -v '^#' /repo/ca/copies.conf | grep -qE '/opt/caddy|[|]blue[|]'"
+reset; echo '/tmp/c/blue/root.crt|blue|kuma' >> /tmp/c/copies.conf
+check "papel blue não é mais tolerado: ausente = FAIL" bash -c "! $CHK --no-http > /tmp/o.log && grep -q 'FAIL\] blue /tmp/c/blue/root.crt: ausente' /tmp/o.log"
 reset; openssl x509 -in "$K/root.crt" -outform DER | openssl x509 -inform DER -out /tmp/c/ha/caddy-local-root.crt
 check "mesma raiz com PEM diferente: PASS com AVISO" bash -c "$CHK --no-http > /tmp/o.log; grep -q 'RESULTADO: 5 PASS, 0 FAIL' /tmp/o.log || grep -q 'AVISO' /tmp/o.log"
 
@@ -71,8 +72,8 @@ rm /tmp/www/caddy-root.crt
 check "cert.home 404: FAIL" bash -c "! $CHK > /tmp/o.log && grep -q 'FAIL\] http://cert.home/caddy-root.crt: 404' /tmp/o.log"
 kill "$SRV" 2>/dev/null || true
 
-check "inventário real: as 7 cópias conhecidas e a fonte oficial declarada" bash -c \
-  "[ \$(grep -cvE '^(#|$)' /repo/ca/copies.conf) -eq 7 ] && grep -q '|oficial|' /repo/ca/copies.conf && grep -q 'uptime-kuma' /repo/ca/copies.conf"
+check "inventário real: as 6 cópias conhecidas (sem a Blue) e a fonte oficial declarada" bash -c \
+  "[ \$(grep -cvE '^(#|$)' /repo/ca/copies.conf) -eq 6 ] && grep -q '|oficial|' /repo/ca/copies.conf && grep -q 'uptime-kuma' /repo/ca/copies.conf"
 
 printf '\nRESULTADO: %d PASS, %d FAIL\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

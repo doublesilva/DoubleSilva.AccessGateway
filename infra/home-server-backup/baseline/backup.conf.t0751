@@ -1,0 +1,112 @@
+# shellcheck shell=bash
+# Configuração do backup-home-server. Instalado em /etc/home-server-backup/backup.conf (root:root 600).
+# Não contém segredos: apenas caminhos. Senha do restic e URL do Kuma ficam em arquivos próprios, root-only.
+# shellcheck disable=SC2034  # variáveis consumidas pelo backup-home-server
+
+# --- Destino -------------------------------------------------------------------------------------------------
+BACKUP_MOUNT="/mnt/windows-backup"
+BACKUP_REQUIRE_FSTYPE="cifs"                       # "none" apenas em testes
+RESTIC_REPOSITORY="${BACKUP_MOUNT}/restic-home-server"
+# Mesmo arquivo de senha usado pelo script v1 (confirmado em 2026-10-10).
+RESTIC_PASSWORD_FILE="/root/.restic-home-server-password"
+
+# Tag dos snapshots desta versão. A retenção (forget) atua SOMENTE nesta tag: os snapshots antigos
+# (tag "home-server", 2026-09-12) são preservados.
+BACKUP_TAG="home-server-v2"
+RETENTION=(--keep-daily 7 --keep-weekly 4 --keep-monthly 6)
+
+# --- Monitoramento -------------------------------------------------------------------------------------------
+# Mesmo arquivo do script anterior (formato curl --config, linha url = "..."). Sucesso: status=up; falha: status=down.
+KUMA_PUSH_CONFIG="/root/.uptime-kuma-backup-push.conf"
+KUMA_CACERT="/etc/homeautomation/certs/caddy-local-root.crt"   # TLS verificado quando a URL é HTTPS interna
+
+# --- Execução ------------------------------------------------------------------------------------------------
+STAGING_PARENT="/var/backups/home-server"          # root 700; cada execução usa um subdiretório temporário
+RESTIC_CACHE_DIR="/var/cache/home-server-backup/restic"   # sob o systemd não há $HOME; sem isto o restic roda sem cache
+LOCK_FILE="/run/lock/home-server-backup.lock"
+LIB_DIR="/usr/local/lib/home-server-backup"        # sqlite_snapshot.py
+SNAPSHOT_RUNNER="docker"                           # docker (produção) | local (somente testes)
+PYTHON_IMAGE="python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1"  # 3.12-slim, SQLite 3.46.1
+
+# --- Bancos SQLite: snapshot consistente (nome lógico|caminho). Os arquivos vivos são excluídos do restic. ----
+SQLITE_DATABASES=(
+  "authelia|/home/diego/containers/authelia/config/db.sqlite3"
+  "uptime-kuma|/home/diego/containers/uptime-kuma/data/kuma.db"
+  "frigate|/home/diego/containers/homeautomation/infrastructure/frigate/frigate-config/frigate.db"
+  "frigate-backup|/home/diego/containers/homeautomation/infrastructure/frigate/frigate-config/backup.db"
+  "homeautomation-api|/home/diego/containers/homeautomation/infrastructure/api/data/homeautomation.db"
+  "home-events|/mnt/home-events/database/home-events.db"
+  "gate-audit|/mnt/home-events/database/gate-audit.db"
+  # AccessGateway Green (ignorado enquanto não existir)
+  "accessgateway-authelia|/srv/accessgateway/data/authelia/db.sqlite3"
+)
+
+# --- Caminhos incluídos (classificação na documentação). Ausentes geram aviso, não falha. ---------------------
+BACKUP_PATHS=(
+  # Containers: configuração e dados persistentes (bancos via snapshot acima)
+  /home/diego/containers
+  # Gateway atual: CA interna, Caddyfile, dashboards (certificados de folha excluídos)
+  /opt/caddy
+  # Gateway novo (após a T03 do AccessGateway)
+  /srv/accessgateway
+  # Raiz PÚBLICA da CA no caminho canônico (T07.5.1); reconstruível da PKI da Green, incluída por completude
+  /etc/accessgateway
+  # Segredos e certificados das aplicações
+  /etc/homeautomation
+  /etc/jarvis
+  /etc/home-smoke-test
+  # Sistema: scripts, units, sudoers, firewall, rede, SSH, montagens, pacotes
+  /usr/local/sbin
+  /usr/local/lib/home-server-backup
+  /etc/home-server-backup
+  /etc/systemd/system
+  /etc/sudoers.d
+  /etc/ufw
+  /etc/netplan
+  /etc/systemd/logind.conf.d
+  /etc/fstab
+  /etc/apt/sources.list.d
+  /etc/apt/keyrings
+  /etc/ssh
+  /root/.uptime-kuma-backup-push.conf
+  # Biometria Jarvis (dados sensíveis; restic cifra o repositório)
+  /var/lib/docker/volumes/jarvis_jarvis-speaker-data/_data   # perfis de voz (embeddings)
+  /srv/jarvis-calibration                                     # amostras de áudio de calibração (opt-in)
+  # Histórico do portão (imagens dos eventos; bancos via snapshot acima)
+  /mnt/home-events
+  # Portainer (cópia a quente: bbolt; interface administrativa, recriável)
+  /var/lib/docker/volumes/portainer_data/_data
+)
+
+# --- Exclusões (padrões do restic) ---------------------------------------------------------------------------
+BACKUP_EXCLUDES=(
+  # Gravações de vídeo e caches do Frigate
+  /home/diego/containers/homeautomation/infrastructure/frigate/frigate-storage
+  /home/diego/containers/homeautomation/infrastructure/frigate/frigate-config/model_cache
+  # Certificados de folha e locks do Caddy (reemitidos automaticamente)
+  /opt/caddy/data/caddy/certificates
+  /opt/caddy/data/caddy/locks
+  /srv/accessgateway/data/caddy/caddy/certificates
+  /srv/accessgateway/data/caddy/caddy/locks
+  # Green: cópias do banco da Blue usadas só no provisionamento (o banco ativo vai por snapshot; sem duplicação)
+  /srv/accessgateway/snapshots
+  "/srv/accessgateway/data/authelia/db.sqlite3.replaced-*"
+  # AdGuard: estatísticas e log de consultas (regeneráveis; bbolt a quente)
+  /home/diego/containers/adguard/work
+  # Mosquitto: logs
+  /home/diego/containers/homeautomation/infrastructure/frigate/mosquitto/log
+  # Senha do restic (não faz sentido dentro do próprio repositório)
+  /root/.restic-home-server-password
+  /root/.config/restic
+  # Temporários, caches e artefatos de build
+  "*.tmp"
+  "*.partial"
+  "*~"
+  "**/__pycache__"
+  "**/node_modules"
+  "**/bin/Debug"
+  "**/obj"
+  "**/.cache"
+  /srv/jarvis-calibration/voice-debug
+  lost+found
+)

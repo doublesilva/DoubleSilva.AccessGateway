@@ -93,6 +93,14 @@ check "Green: TLS verificado e Authelia via gateway (LAN e Tailscale)" bash -c "
 check "Green: 37 PASS / 0 FAIL ($(count PASS) PASS / $(count FAIL) FAIL)" all_pass
 check "Green: nenhuma menção a 'Container caddy'" bash -c "! grep -q 'Container caddy ' /tmp/out.txt"
 
+# 1b. R4/R5 (R5a): Blue removida — containers caddy e authelia da Blue inexistentes → o smoke continua 37/0
+green_active
+rm -f "$SMOKE_STATE/known/caddy" "$SMOKE_STATE/known/authelia" "$SMOKE_STATE/running/authelia" "$SMOKE_STATE/health/authelia"
+smoke || true
+check "Blue removida (R4): 37 PASS / 0 FAIL ($(count PASS) PASS / $(count FAIL) FAIL)" all_pass
+check "Blue removida (R4): gateway Green e sem Caddy concorrente" bash -c \
+  "grep -q 'PASS\] Gateway ativo em 443: Green' /tmp/out.txt && grep -q 'PASS\] Sem Caddy concorrente fora do gateway ativo (Green)' /tmp/out.txt"
+
 # 2. Blue ativa (Green em preparação, fora de 80/443) → suporte ao rollback
 blue_active
 smoke || true

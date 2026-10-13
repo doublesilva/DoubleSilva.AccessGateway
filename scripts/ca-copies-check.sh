@@ -46,7 +46,7 @@ while IFS='|' read -r path role consumers; do
   case "$path" in ''|'#'*) continue ;; esac
   label="$role $path"
   if [ ! -e "$path" ]; then
-    [ "$role" = blue ] || [ "$role" = orfa ] && { note "$label: ausente ($role)"; continue; }
+    [ "$role" = orfa ] && { note "$label: ausente ($role)"; continue; }
     bad "$label: ausente"; continue
   fi
   [ -L "$path" ] && { bad "$label: link simbólico (esperado arquivo)"; continue; }

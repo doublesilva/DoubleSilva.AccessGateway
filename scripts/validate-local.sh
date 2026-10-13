@@ -13,7 +13,7 @@
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks).
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies cadistribute kuma kumaauth restoredrill lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -481,6 +481,15 @@ check_deployha() {
   fi
 }
 
+check_coverage() {
+  step "Cobertura do backup sem a Blue (R5a: backup-coverage-check com restic simulado)"
+  if docker run --rm --network none -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/backup-coverage/backup-coverage-test.sh > "$TMP/coverage.out" 2>&1; then
+    ok "backup-coverage: $(tail -1 "$TMP/coverage.out")"
+  else
+    bad "backup-coverage: $(grep -E '^\[FAIL\]' "$TMP/coverage.out" | head -8)"
+  fi
+}
+
 check_cacopies() {
   step "Cópias da raiz da CA (T07.5: ca-copies-check.sh somente leitura, CA fictícia)"
   if docker run --rm -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/ca-copies/ca-copies-test.sh > "$TMP/cacopies.out" 2>&1; then
@@ -589,7 +598,7 @@ check_lint() {
       -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh \
       tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh infra/home-smoke-test/smoke-paths.sh \
       tests/status-dashboard/*.sh tests/status-dashboard/stubs/* tests/public-ca/*.sh \
-      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh tests/ca-distribute/*.sh \
+      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh tests/backup-coverage/*.sh tests/ca-distribute/*.sh \
       infra/home-server-backup/install-conf.sh infra/uptime-kuma/kuma-ca-migrate.sh infra/uptime-kuma/kuma-auth.sh tests/uptime-kuma/*.sh tests/uptime-kuma/stubs/* \
       infra/restore-drill/restore-drill.sh \
       tests/deploy-homeautomation/*.sh infra/deploy-homeautomation/install.sh \
@@ -622,7 +631,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies cadistribute kuma kumaauth restoredrill lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lint}"; do
   for s in $section; do "check_$s"; done
 done
 

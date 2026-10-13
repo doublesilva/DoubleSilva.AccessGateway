@@ -115,15 +115,21 @@ check "nenhum comando docker/systemctl no distribuidor (não reinicia nada)" bas
 check "manifesto real: canônico primeiro, 3 alvos, nenhum caminho de chave" bash -c \
   "[ \"\$(grep -vE '^[[:space:]]*(#|\$)' /repo/ca/targets.conf | head -1 | cut -d'|' -f1)\" = /etc/accessgateway/ca/caddy-root.crt ] && [ \$(grep -cvE '^[[:space:]]*(#|\$)' /repo/ca/targets.conf) = 3 ] && ! grep -vE '^#' /repo/ca/targets.conf | grep -qiE '\\.key|pki'"
 
-# 10. backup.conf: só a inclusão de /etc/accessgateway; instalador
+# 10. backup.conf (R5a): versão instalada hoje = baseline da T07.5.1; a nova só REMOVE a Blue; instalador
 I=/repo/infra/home-server-backup/install-conf.sh
-grep -v -e '^  /etc/accessgateway$' -e '# Raiz PÚBLICA da CA no caminho canônico (T07.5.1)' /repo/infra/home-server-backup/backup.conf > /tmp/backup.conf.antigo
-check "backup.conf: diferença para a versão instalada = só /etc/accessgateway (+ comentário)" bash -c \
-  "[ \"\$(sha256sum < /tmp/backup.conf.antigo | cut -d' ' -f1)\" = \"\$(sed -n 's/^KNOWN_PREVIOUS=\\([0-9a-f]*\\).*/\\1/p' $I)\" ]"
-export BACKUP_CONF_DST=/tmp/etc/backup.conf; mkdir -p /tmp/etc; install -m 600 /tmp/backup.conf.antigo "$BACKUP_CONF_DST"
+B=/repo/infra/home-server-backup/baseline/backup.conf.t0751
+N=/repo/infra/home-server-backup/backup.conf
+check "baseline da T07.5.1 = KNOWN_PREVIOUS do instalador" bash -c \
+  "[ \"\$(sha256sum < $B | cut -d' ' -f1)\" = \"\$(sed -n 's/^KNOWN_PREVIOUS=\([0-9a-f]*\).*/\1/p' $I)\" ]"
+check "backup.conf novo: sem /opt/caddy e sem o Authelia da Blue" bash -c "! grep -vE '^[[:space:]]*#' $N | grep -qE '/opt/caddy|/home/diego/containers/authelia'"
+check "backup.conf novo: diferença para a T07.5.1 = só remoções da Blue (+ 3 comentários)" bash -c "
+  diff $B $N | grep '^>' | grep -vE '^> +#' && exit 1
+  [ \"\$(diff $B $N | grep '^<' | grep -vE '^< +#' | sed 's/^< *//' | sort | tr '\n' ' ')\" = '\"authelia|/home/diego/containers/authelia/config/db.sqlite3\" /opt/caddy /opt/caddy/data/caddy/certificates /opt/caddy/data/caddy/locks ' ]"
+check "backup.conf novo: Green, CA canônica e bancos mantidos" bash -c "grep -qx '  /srv/accessgateway' $N && grep -qx '  /etc/accessgateway' $N && grep -q '\"accessgateway-authelia|/srv/accessgateway/data/authelia/db.sqlite3\"' $N && grep -q '\"uptime-kuma|' $N && grep -qx '  /srv/accessgateway/data/caddy/caddy/certificates' $N"
+export BACKUP_CONF_DST=/tmp/etc/backup.conf; mkdir -p /tmp/etc; install -m 600 $B "$BACKUP_CONF_DST"
 check "install-conf --apply: instala (root 600) e guarda .prev" bash -c \
-  "bash $I --apply >/dev/null && cmp -s $BACKUP_CONF_DST /repo/infra/home-server-backup/backup.conf && [ \"\$(stat -c '%U %a' $BACKUP_CONF_DST)\" = 'root 600' ] && cmp -s $BACKUP_CONF_DST.prev /tmp/backup.conf.antigo"
-check "install-conf: idempotente e revert" bash -c "bash $I --apply | grep -q 'já instalado' && bash $I --revert >/dev/null && cmp -s $BACKUP_CONF_DST /tmp/backup.conf.antigo"
+  "bash $I --apply >/dev/null && cmp -s $BACKUP_CONF_DST $N && [ \"\$(stat -c '%U %a' $BACKUP_CONF_DST)\" = 'root 600' ] && cmp -s $BACKUP_CONF_DST.prev $B"
+check "install-conf: idempotente e revert (volta à T07.5.1, com a Blue)" bash -c "bash $I --apply | grep -q 'já instalado' && bash $I --revert >/dev/null && cmp -s $BACKUP_CONF_DST $B"
 echo '# manual' >> "$BACKUP_CONF_DST"
 fails "install-conf: recusa backup.conf desconhecido" bash "$I" --apply
 

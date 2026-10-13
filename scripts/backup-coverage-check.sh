@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Confere, no snapshot mais recente do backup (tag home-server-v2), a presença dos itens essenciais para a migração
-# e para a restauração: CA interna, segredos, configurações e bancos (por snapshot consistente). Somente leitura;
+# e para a restauração do AccessGateway Green: PKI, segredos, configurações e bancos (por snapshot consistente). Somente leitura;
 # imprime apenas os caminhos verificados (nunca conteúdo). Usa a configuração do backup-home-server.
 #
 # Uso (root): backup-coverage-check.sh [--snapshot <id>]
@@ -33,17 +33,28 @@ need() { # categoria caminho [opcional]
 }
 
 S=/var/backups/home-server/current/sqlite
-need "CA Blue"     /opt/caddy/data/caddy/pki/authorities/local/root.key
-need "CA Blue"     /opt/caddy/data/caddy/pki/authorities/local/root.crt
-need "Caddy Blue"  /opt/caddy/Caddyfile
-need "Authelia"    /home/diego/containers/authelia/config/configuration.yml
-need "Authelia"    /home/diego/containers/authelia/config/users_database.yml
-need "Authelia"    /home/diego/containers/authelia/secrets/oidc/jwks-rsa.key
-need "Authelia"    /home/diego/containers/authelia/secrets/STORAGE_ENCRYPTION_KEY
+# R5a: sem a Blue. Gateway = AccessGateway Green: PKI completa, segredos e usuários do Authelia, banco por snapshot,
+# ambiente e configuração da release; CA canônica. Itens alinhados à restauração isolada da T07.7.
+G=/srv/accessgateway
+PKI=$G/data/caddy/caddy/pki/authorities/local
+need "Green PKI"   "$PKI/root.crt"
+need "Green PKI"   "$PKI/root.key"
+need "Green PKI"   "$PKI/intermediate.crt"
+need "Green PKI"   "$PKI/intermediate.key"
+need "Green"       "$G/accessgateway.env"
+need "Green"       "$G/app/caddy/Caddyfile"
+need "Green"       "$G/app/authelia/configuration.yml"
+need "Authelia"    "$G/data/authelia/users_database.yml"
+need "Authelia"    "$G/secrets/authelia/JWT_SECRET"
+need "Authelia"    "$G/secrets/authelia/SESSION_SECRET"
+need "Authelia"    "$G/secrets/authelia/STORAGE_ENCRYPTION_KEY"
+need "Authelia"    "$G/secrets/authelia/oidc/hmac_secret"
+need "Authelia"    "$G/secrets/authelia/oidc/jwks-rsa.key"
+need "CA pública"  /etc/accessgateway/ca/caddy-root.crt
 need "Segredos"    /etc/homeautomation/secrets/oidc-panel-client-secret
 need "Segredos"    /etc/homeautomation/secrets/oidc-outhome-client-secret
 need "Segredos"    /etc/jarvis/secrets/homeautomation-client-secret
-need "Bancos"      "$S/authelia/db.sqlite3"
+need "Bancos"      "$S/accessgateway-authelia/db.sqlite3"
 need "Bancos"      "$S/homeautomation-api/homeautomation.db"
 need "Bancos"      "$S/home-events/home-events.db"
 # Uptime Kuma (T07.6.1): banco por snapshot, compose e URLs dos pushes (só nomes; o conteúdo nunca é lido aqui)
@@ -51,11 +62,6 @@ need "Kuma"        "$S/uptime-kuma/kuma.db"
 need "Kuma"        /home/diego/containers/uptime-kuma/compose.yaml
 need "Kuma"        /root/.uptime-kuma-backup-push.conf
 need "Kuma"        /etc/home-smoke-test/kuma-push-url
-need "Green"       /srv/accessgateway/accessgateway.env opcional
-need "Green"       /srv/accessgateway/secrets/authelia/oidc/jwks-rsa.key opcional
-need "Green"       /srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.key opcional
-need "CA pública"  /etc/accessgateway/ca/caddy-root.crt opcional
-need "Green"       "$S/accessgateway-authelia/db.sqlite3" opcional
 if grep -qE '^/srv/accessgateway/data/authelia/db\.sqlite3$' "$LIST"; then
   printf '[FAIL] %-12s banco ativo da Green copiado como arquivo (deveria ir só por snapshot)\n' Green; FAIL=$((FAIL + 1))
 else
