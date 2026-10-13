@@ -5,6 +5,7 @@
 //   seed        senha, token push backup, token push smoke → cria o usuário, a notificação Telegram (servidor apontado
 //               para 127.0.0.1:9: nada sai do sandbox), 8 monitores como os de produção (2 push), heartbeats, e por fim
 //               disableAuth=true, reproduzindo a exposição da T07.6
+//   expose      senha, usuário → disableAuth=true de novo (prepara o cenário seguinte do teste)
 //   anon        conexão anônima: estado e se getSettings é permitido (exposição) → "estado=… admin=sim|nao"
 //   token       senha, usuário → login; imprime o JWT (fictício) para o teste de sessão antiga
 //   bytoken     token → loginByToken → "token=aceito|recusado"
@@ -80,6 +81,18 @@ const modes = {
         must(await call(c.s, "setSettings", cur.data, pw), "setSettings disableAuth=true");
         c.s.close();
         console.log(`seed=ok monitores=${list.length}`);
+    },
+
+    // Volta o SANDBOX ao estado exposto (para o próximo cenário do teste): login + disableAuth=true com a senha
+    async expose() {
+        const [pw, user] = input();
+        const { s } = await connect();
+        must(await call(s, "login", { username: user, password: pw, token: "" }), "login");
+        const cur = must(await call(s, "getSettings"), "getSettings");
+        cur.data.disableAuth = true;
+        must(await call(s, "setSettings", cur.data, pw), "setSettings disableAuth=true");
+        s.close();
+        console.log("exposto=ok");
     },
 
     async anon() {

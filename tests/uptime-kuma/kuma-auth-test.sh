@@ -7,11 +7,11 @@
 #      a exposição da T07.6 é reproduzida (anônimo = administrador);
 #   2. --check: pronto; recusa sem o kuma.db no backup;
 #   3. --apply com senha fraca: recusado antes de qualquer alteração de autenticação;
-#   4. --apply com falha de login simulada: rollback automático, de volta ao estado anterior, dados intactos;
+#   4. --apply com falha de login simulada: FALHA SEGURA (autenticação continua ligada; nada volta a expor), dados intactos;
 #   5. --apply: anônimo sem acesso, login legítimo aceito, senha antiga e sessão antiga (token) recusadas, token forjado
 #      recusado, push dos dois monitores funcionando, /metrics 401, dados e histórico preservados, sem reinício;
-#   6. --apply de novo: nada a fazer; --rollback: login automático de volta; --restore-db: banco do snapshot restaurado
-#      (senha antiga volta a valer, dados idênticos);
+#   6. --apply de novo: nada a fazer; --rollback recusado com o alias aberto e aceito só com o alias fechado; --restore-db:
+#      banco do snapshot já com a autenticação ligada (sem janela de exposição), senha nova, dados do snapshot;
 #   7. nenhuma senha, token de push ou JWT nos logs do Kuma nem nas saídas do script.
 set -Eeuo pipefail
 cd "$(dirname "$0")/../.."
@@ -82,15 +82,19 @@ else grep -q 'senha recusada' "$W/weak.out" && ok "--apply: senha fraca recusada
 [ "$(echo | sb anon)" = "estado=autoLogin admin=sim" ] && [ "$(printf '%s\n%s\n' "$OLD_PW" "$USER" | sb login)" = login=aceito ] \
   && ok "senha fraca: autenticação e senha inalteradas" || bad "senha fraca alterou o estado"
 
-echo "== --apply com falha de login simulada (rollback automático) =="
+echo "== --apply com falha de login simulada (falha segura) =="
 if KUMA_AUTH_TEST_FAULT=login ka --apply > "$W/fault.out" 2>&1; then bad "falha simulada deveria abortar o apply"
 else
-  grep -q 'ROLLBACK automático concluído' "$W/fault.out" && ok "falha de login após habilitar: rollback automático executado" || bad "rollback automático: $(tail -4 "$W/fault.out")"
+  grep -q 'FALHA SEGURA: autenticação mantida ligada' "$W/fault.out" && ! grep -qi 'rollback' "$W/fault.out" \
+    && ok "falha de login após habilitar: falha segura, nada revertido" || bad "falha segura: $(tail -4 "$W/fault.out")"
 fi
-[ "$(echo | sb anon)" = "estado=autoLogin admin=sim" ] && [ "$(q "select value from setting where key='disableAuth'")" = true ] \
-  && ok "após o rollback automático: estado anterior (disableAuth=true, login automático)" || bad "estado após o rollback automático"
+[ "$(echo | sb anon)" = "estado=loginRequired admin=nao" ] && [ "$(q "select value from setting where key='disableAuth'")" = false ] \
+  && ok "após a falha: autenticação continua ligada (o acesso anônimo NÃO volta)" || bad "estado após a falha: exposição reaberta"
+[ "$(printf '%s\n%s\n' "$NEW_PW" "$USER" | sb login)" = login=aceito ] && ok "após a falha: o administrador entra com a senha definida" || bad "login após a falha"
 [ "$(q "select count(*) || '/' || sum(active) from monitor; select count(*) from notification; select count(*) from monitor_notification;" | paste -sd' ' -)" = "$fp0" ] \
-  && ok "após o rollback automático: monitores, notificação e associações intactos" || bad "dados mudaram no rollback automático"
+  && ok "após a falha: monitores, notificação e associações intactos" || bad "dados mudaram na falha"
+# prepara o cenário principal: sandbox exposto de novo, como a produção
+[ "$(printf '%s\n%s\n' "$NEW_PW" "$USER" | sb expose)" = exposto=ok ] || bad "não foi possível expor o sandbox de novo"
 
 echo "== --apply =="
 b_b=$(hb_count "Backup Home Server"); b_s=$(hb_count "Home Server - Smoke Test")
@@ -118,15 +122,24 @@ SNAPS=$(find "$W/backups" -name kuma.db | sort)
 echo "== idempotência, rollback e restauração =="
 ka --apply > "$W/again.out" 2>&1 && grep -q 'JÁ habilitada' "$W/again.out" && ! grep -q 'snapshot consistente' "$W/again.out" \
   && ok "--apply de novo: nada a fazer" || bad "--apply repetido: $(tail -2 "$W/again.out")"
-ka --rollback > "$W/rollback.out" 2>&1 && [ "$(echo | sb anon)" = "estado=autoLogin admin=sim" ] \
-  && ok "--rollback: login automático de volta (estado anterior)" || bad "--rollback: $(tail -3 "$W/rollback.out")"
+printf '#!/bin/sh\necho 200\n' > "$W/alias-aberto.sh"; printf '#!/bin/sh\necho 301\n' > "$W/alias-fechado.sh"; chmod +x "$W"/alias-*.sh
+if KUMA_ALIAS_CHECK_CMD="$W/alias-aberto.sh" ka --rollback > "$W/rollback0.out" 2>&1; then bad "--rollback com o alias aberto deveria recusar"
+else
+  grep -q 'recusado: o alias kuma.home não está fechado' "$W/rollback0.out" && [ "$(echo | sb anon)" = "estado=loginRequired admin=nao" ] \
+    && ok "--rollback recusado com o alias kuma.home aberto (não reabre o acesso anônimo)" || bad "--rollback com alias aberto: $(tail -2 "$W/rollback0.out")"
+fi
+KUMA_ALIAS_CHECK_CMD="$W/alias-fechado.sh" ka --rollback > "$W/rollback.out" 2>&1 && [ "$(echo | sb anon)" = "estado=autoLogin admin=sim" ] \
+  && ok "--rollback com o alias fechado (301) e confirmação: autenticação desligada temporariamente" || bad "--rollback: $(tail -3 "$W/rollback.out")"
 ka --apply > "$W/apply2.out" 2>&1 && [ "$(echo | sb anon)" = "estado=loginRequired admin=nao" ] \
   && ok "--apply depois do rollback: autenticação habilitada de novo" || bad "--apply após rollback"
 FIRST=$(dirname "$(head -1 <<<"$SNAPS")")
-ka --restore-db "$FIRST" > "$W/restore.out" 2>&1 && grep -q 'banco restaurado' "$W/restore.out" \
-  && ok "--restore-db: banco trocado com o Kuma parado e iniciado de novo" || bad "--restore-db: $(tail -3 "$W/restore.out")"
-[ "$(echo | sb anon)" = "estado=autoLogin admin=sim" ] && [ "$(printf '%s\n%s\n' "$OLD_PW" "$USER" | sb login)" = login=aceito ] \
-  && ok "--restore-db: estado do snapshot (senha antiga, disableAuth=true)" || bad "estado após o restore"
+ka --restore-db "$FIRST" > "$W/restore.out" 2>&1 && grep -q 'RESTORE concluído' "$W/restore.out" \
+  && ok "--restore-db: banco do snapshot, senha nova definida e verificada" || bad "--restore-db: $(grep -E 'FALHA|ERRO' "$W/restore.out" | head -3)"
+grep -q 'Kuma de volta em .*conexão anônima: loginRequired' "$W/restore.out" \
+  && ok "--restore-db: o snapshot (disableAuth=true) volta já com a autenticação ligada, sem janela de exposição" || bad "restore: estado na volta do Kuma"
+[ "$(echo | sb anon)" = "estado=loginRequired admin=nao" ] && [ "$(printf '%s\n%s\n' "$NEW_PW" "$USER" | sb login)" = login=aceito ] \
+  && [ "$(printf '%s\n%s\n' "$OLD_PW" "$USER" | sb login)" = login=recusado ] \
+  && ok "--restore-db: anônimo negado; senha nova aceita; senha do snapshot recusada" || bad "estado após o restore"
 [ "$(q "select count(*) || '/' || sum(active) from monitor; select count(*) from notification; select count(*) from monitor_notification;" | paste -sd' ' -)" = "$fp0" ] \
   && ok "--restore-db: monitores, notificação e associações do snapshot" || bad "dados após o restore"
 [ -n "$(docker exec "$NAME" sh -c 'ls /app/data/kuma.db.antes-restauracao-* 2>/dev/null')" ] && ok "--restore-db: banco substituído guardado antes da troca" || bad "cópia do banco substituído ausente"
