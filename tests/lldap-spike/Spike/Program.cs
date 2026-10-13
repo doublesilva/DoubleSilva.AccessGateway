@@ -54,7 +54,9 @@ try
             report.Check($"bind em {args[1]} como {args[2]} {(args.Length > 4 ? args[4] : "aceito")}", ok == (args.Length <= 4 || args[4] != "recusado"), ok ? "aceito" : "recusado");
             break;
         default:
-            throw new ArgumentException(mode);
+            // T09.3.5: modos de resiliência e recuperação.
+            await new Resilience(http, env, report).Run(mode, args.Skip(1).ToArray());
+            break;
     }
 }
 catch (Exception e)
@@ -454,6 +456,38 @@ internal sealed class LldapAdmin(LabEnv env)
     public async Task RemoveFromGroup(string user, string group) =>
         await Gql("mutation($u:String!,$g:Int!){removeUserFromGroup(userId:$u,groupId:$g){ok}}", new { u = user, g = await GroupId(group) });
 
+    /// <summary>Login do admin no LLDAP sem esperar (falha = senha do admin inválida ou LLDAP fora).</summary>
+    public async Task<bool> TryLogin()
+    {
+        try
+        {
+            var res = await _http.PostAsJsonAsync("/auth/simple/login", new { username = "admin", password = env.LldapAdminPassword });
+            if (res.IsSuccessStatusCode)
+            {
+                _token = (await res.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("token").GetString();
+                return true;
+            }
+        }
+        catch (HttpRequestException)
+        {
+        }
+
+        return false;
+    }
+
+    /// <summary>Usuários com e-mail, nome e grupos, em ordem: base para comparar antes e depois da restauração.</summary>
+    public async Task<SortedDictionary<string, string>> Snapshot()
+    {
+        var result = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        foreach (var u in (await Gql("{users{id email displayName groups{displayName}}}", null)).GetProperty("users").EnumerateArray())
+        {
+            var groups = u.GetProperty("groups").EnumerateArray().Select(g => g.GetProperty("displayName").GetString()).Order(StringComparer.Ordinal);
+            result[u.GetProperty("id").GetString()!] = $"{u.GetProperty("email").GetString()}|{u.GetProperty("displayName").GetString()}|{string.Join(",", groups)}";
+        }
+
+        return result;
+    }
+
     public async Task<List<string>> UserIds() =>
         (await Gql("{users{id}}", null)).GetProperty("users").EnumerateArray().Select(u => u.GetProperty("id").GetString()!).ToList();
 
@@ -592,6 +626,9 @@ internal sealed partial class Session(HttpClient http, LabEnv env, string userna
 
     public string Password { get; private set; } = password;
 
+    /// <summary>Cookie de sessão (para reaproveitar uma sessão aberta entre fases do ensaio).</summary>
+    public string? Cookie { get => _cookie; set => _cookie = value; }
+
     public Dictionary<string, string> LastHeaders { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public async Task Login()
@@ -657,32 +694,82 @@ internal sealed partial class Session(HttpClient http, LabEnv env, string userna
         return ChangeOutcome.Failed;
     }
 
+    private const string OidcRedirect = "https://app.example.test/cb";
+
     /// <summary>Fluxo authorization code do cliente OIDC fictício; devolve o claim sub do id_token.</summary>
-    public async Task<string> OidcSub()
+    public async Task<string> OidcSub() => SubOf((await OidcLogin("openid profile groups")).GetProperty("id_token").GetString()!);
+
+    /// <summary>Autorização (com a sessão atual) + troca do code; devolve a resposta do endpoint de token.</summary>
+    public async Task<JsonElement> OidcLogin(string scope)
     {
-        const string redirect = "https://app.example.test/cb";
-        var authorize = $"/api/oidc/authorization?client_id=lab-app&redirect_uri={Uri.EscapeDataString(redirect)}&response_type=code&scope=openid%20profile%20groups&state=lab-state-123456&nonce=lab-nonce-123456";
-        using var res = await Send(HttpMethod.Get, authorize, null);
-        var location = res.Headers.Location?.ToString() ?? "";
-        var code = Regex.Match(location, "[?&]code=([^&]+)").Groups[1].Value;
-        if (code.Length == 0)
+        var path = $"/api/oidc/authorization?client_id=lab-app&redirect_uri={Uri.EscapeDataString(OidcRedirect)}&response_type=code&scope={Uri.EscapeDataString(scope)}&state=lab-state-123456&nonce=lab-nonce-123456";
+        var code = "";
+        for (var hop = 0; hop < 3 && code.Length == 0; hop++)
         {
-            throw new InvalidOperationException($"autorização OIDC sem code: {(int)res.StatusCode} {location} {await res.Content.ReadAsStringAsync()}");
+            using var res = await Send(HttpMethod.Get, path, null);
+            var location = res.Headers.Location?.ToString() ?? "";
+            code = Regex.Match(location, "[?&]code=([^&]+)").Groups[1].Value;
+            var flow = Regex.Match(location, "/consent/openid/decision\\?.*flow_id=([^&]+)").Groups[1].Value;
+            if (code.Length > 0)
+            {
+                break;
+            }
+
+            if (flow.Length == 0)
+            {
+                throw new InvalidOperationException($"autorização OIDC sem code: {(int)res.StatusCode} {location}");
+            }
+
+            // offline_access exige consentimento explícito mesmo com consent_mode implicit: aceita como o portal.
+            using var consent = await Send(HttpMethod.Post, "/api/oidc/consent",
+                new { flow_id = flow, client_id = "lab-app", consent = true, pre_configure = false, claims = Array.Empty<string>() });
+            var body = await consent.Content.ReadFromJsonAsync<JsonElement>();
+            var next = body.GetProperty("data").GetProperty("redirect_uri").GetString()!;
+            path = new Uri(next).PathAndQuery;
         }
 
-        using var tokenReq = Request(HttpMethod.Post, "/api/oidc/token", null);
-        tokenReq.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+        if (code.Length == 0)
+        {
+            throw new InvalidOperationException("autorização OIDC sem code após consentimento");
+        }
+
+        return await Token(new Dictionary<string, string>
         {
             ["grant_type"] = "authorization_code",
             ["code"] = Uri.UnescapeDataString(code),
-            ["redirect_uri"] = redirect,
-            ["client_id"] = "lab-app",
-            ["client_secret"] = env.ClientSecret,
+            ["redirect_uri"] = OidcRedirect,
         });
+    }
+
+    /// <summary>Endpoint de token com as credenciais do cliente (sem cookie de sessão).</summary>
+    public async Task<JsonElement> Token(Dictionary<string, string> form)
+    {
+        form["client_id"] = "lab-app";
+        form["client_secret"] = env.ClientSecret;
+        using var tokenReq = Request(HttpMethod.Post, "/api/oidc/token", null);
+        tokenReq.Content = new FormUrlEncodedContent(form);
         tokenReq.Headers.Remove("Cookie");
         using var tokenRes = await http.SendAsync(tokenReq);
-        var token = await tokenRes.Content.ReadFromJsonAsync<JsonElement>();
-        var idToken = token.GetProperty("id_token").GetString()!;
+        var body = await tokenRes.Content.ReadAsStringAsync();
+        if (!tokenRes.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"token {(int)tokenRes.StatusCode}: {body}");
+        }
+
+        return JsonDocument.Parse(body).RootElement.Clone();
+    }
+
+    public async Task<int> UserInfo(string accessToken)
+    {
+        using var req = Request(HttpMethod.Get, "/api/oidc/userinfo", null);
+        req.Headers.Remove("Cookie");
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using var res = await http.SendAsync(req);
+        return (int)res.StatusCode;
+    }
+
+    public static string SubOf(string idToken)
+    {
         var payload = idToken.Split('.')[1].Replace('-', '+').Replace('_', '/');
         payload = payload.PadRight(payload.Length + ((4 - (payload.Length % 4)) % 4), '=');
         return JsonDocument.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(payload))).RootElement.GetProperty("sub").GetString()!;
