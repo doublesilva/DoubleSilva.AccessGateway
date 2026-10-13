@@ -1,0 +1,22 @@
+# Override SOMENTE para tests/authelia-lldap/run.sh (T09.3.7), sobre compose.yml + compose.lldap.yml (--profile lldap):
+#   - projeto e containers próprios (nunca accessgateway-*); o Caddy nunca é iniciado (só `up authelia`);
+#   - Authelia e LLDAP numa rede interna, sem saída e sem portas publicadas (o harness entra na mesma rede).
+name: agldapauth
+
+services:
+  caddy:
+    container_name: agldapauth-caddy
+  authelia:
+    container_name: agldapauth-authelia
+    ports: !reset []
+    networks:
+      - internal
+  lldap:
+    container_name: agldapauth-lldap
+    networks:
+      - internal
+
+networks:
+  internal:
+    name: agldapauth_internal
+    internal: true

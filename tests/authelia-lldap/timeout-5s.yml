@@ -1,0 +1,5 @@
+# T09.3.7: só para comparar com o padrão do Authelia (5s) o timeout LDAP de authelia/configuration.ldap.yml.
+services:
+  authelia:
+    environment:
+      AUTHELIA_AUTHENTICATION_BACKEND_LDAP_TIMEOUT: 5s

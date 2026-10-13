@@ -1,0 +1,30 @@
+# AccessGateway — overlay PREPARADO para o cutover do Authelia para o LLDAP (T09.3.7). NÃO usado pela Green atual:
+# o deploy normal (scripts/deploy-green.sh) usa só compose.yml, com o Authelia no backend file.
+#
+# Uso futuro (cutover):
+#   docker compose --env-file /srv/accessgateway/accessgateway.env -f compose.yml -f compose.lldap.yml \
+#     --profile lldap up -d --wait
+#
+# Efeito sobre o serviço authelia:
+#   - monta authelia/configuration.ldap.yml no lugar de configuration.yml (mesmo destino; o compose mescla volumes
+#     pelo caminho no container);
+#   - senha da conta de serviço do LDAP por arquivo: ${GATEWAY_ROOT}/secrets/authelia/LDAP_PASSWORD;
+#   - só é iniciado depois que o LLDAP está saudável (healthcheck LDAP/GraphQL). O depends_on vale para `up`;
+#     reinícios pela política unless-stopped não esperam o LLDAP e se recuperam sozinhos quando ele volta (T09.3.5).
+# Pré-requisitos: LLDAP provisionado (scripts/lldap-provision.sh) e a conta de serviço "authelia" criada no LLDAP
+# (em lldap_password_manager) ANTES do primeiro `up` com este overlay: o startup check do Authelia faz bind com ela.
+
+services:
+  authelia:
+    environment:
+      AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE: /secrets/LDAP_PASSWORD
+    volumes:
+      - type: bind
+        source: ./authelia/configuration.ldap.yml
+        target: /config/configuration.yml
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      lldap:
+        condition: service_healthy

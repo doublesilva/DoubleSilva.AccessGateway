@@ -11,10 +11,11 @@
 #   6. docker compose config nos dois modos;
 #   7. teste de consistência do snapshot SQLite sob escrita concorrente;
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks);
-#   9. LLDAP no perfil "lldap" (T09.3.6): compose real, backup, restauração isolada e fail-closed da seed.
+#   9. LLDAP no perfil "lldap" (T09.3.6): compose real, backup, restauração isolada e fail-closed da seed;
+#  10. Authelia + LLDAP pelo compose (T09.3.7): overlay compose.lldap.yml com a configuração real de cutover.
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lldap lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lldap authelialdap lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -154,6 +155,27 @@ check_authelia() {
   else
     bad "authelia validate-config: $(tail -5 "$TMP/authelia.out")"
   fi
+
+  # T09.3.7: variante LDAP preparada para o cutover (não usada pela Green atual).
+  if py tests/tools/authelia_ldap_parity.py authelia/configuration.yml authelia/configuration.ldap.yml; then
+    ok "configuration.ldap.yml só difere no authentication_backend (OIDC, acesso, sessão e segundo fator idênticos)"
+  else
+    bad "configuration.ldap.yml diverge da configuração atual além do backend"
+  fi
+  printf %s ldap-ficticio-somente-teste > "$TMP/secrets/LDAP_PASSWORD"
+  if docker run --rm --network none \
+      -v "$REPO/authelia/configuration.ldap.yml:/config/configuration.yml:ro" \
+      -v "$REPO/$TMP/secrets:/secrets:ro" -v "$REPO/$TMP/data:/data" \
+      -e X_AUTHELIA_CONFIG_FILTERS=template \
+      -e AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=/secrets/JWT_SECRET \
+      -e AUTHELIA_SESSION_SECRET_FILE=/secrets/SESSION_SECRET \
+      -e AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/secrets/STORAGE_ENCRYPTION_KEY \
+      -e AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/secrets/LDAP_PASSWORD \
+      "$AUTHELIA_IMAGE" authelia validate-config --config /config/configuration.yml > "$TMP/authelia-ldap.out" 2>&1; then
+    ok "authelia validate-config da variante LDAP (segredos fictícios)"
+  else
+    bad "authelia validate-config (LDAP): $(tail -5 "$TMP/authelia-ldap.out")"
+  fi
 }
 
 check_compose() {
@@ -184,6 +206,27 @@ check_compose() {
     ok "perfil lldap: sem portas, unless-stopped, healthcheck, config ro, segredos só por arquivo, cap_drop ALL; fora do deploy normal"
   else
     bad "serviço lldap fora das regras"
+  fi
+  # T09.3.7: overlay do cutover (Authelia no LDAP, esperando o LLDAP saudável). Sem o perfil, o overlay é inválido.
+  docker compose --env-file env/prep.env.example -f compose.yml -f compose.lldap.yml --profile lldap config --format json > "$TMP/compose-cutover-ldap.json" 2>/dev/null
+  if py tests/tools/compose_check.py "$TMP/compose-cutover-ldap.json" --expect-lldap-cutover; then
+    ok "overlay compose.lldap.yml: configuration.ldap.yml (ro), senha LDAP por arquivo, depends_on lldap saudável"
+  else
+    bad "overlay compose.lldap.yml fora das regras"
+  fi
+  if docker compose -f compose.yml -f compose.lldap.yml config -q > /dev/null 2>&1; then
+    bad "overlay compose.lldap.yml aceito sem --profile lldap (Authelia dependeria de um LLDAP desligado)"
+  else
+    ok "overlay compose.lldap.yml recusado sem --profile lldap"
+  fi
+}
+
+check_authelialdap() {
+  step "Authelia + LLDAP pelo compose (T09.3.7): dependência, DN, login, senha, grupos, OIDC, timeout e falhas"
+  if tests/authelia-lldap/run.sh > "$TMP/authelialdap.out" 2>&1; then
+    ok "$(grep -c '\[PASS\]' .tmp/t09.3.7/harness.log) verificações do harness e $(grep -c '\[PASS\]' .tmp/t09.3.7/run.log) do script; $(tail -1 .tmp/t09.3.7/run.log | cut -c10-)"
+  else
+    bad "Authelia + LLDAP: $(grep -h -E '\[FAIL\]' .tmp/t09.3.7/run.log .tmp/t09.3.7/harness.log | head -5)"
   fi
 }
 
@@ -625,7 +668,7 @@ check_lint() {
       -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh \
       tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh infra/home-smoke-test/smoke-paths.sh \
       tests/status-dashboard/*.sh tests/status-dashboard/stubs/* tests/public-ca/*.sh \
-      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh tests/backup-coverage/*.sh tests/ca-distribute/*.sh tests/lldap/*.sh \
+      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh tests/backup-coverage/*.sh tests/ca-distribute/*.sh tests/lldap/*.sh tests/authelia-lldap/*.sh \
       infra/home-server-backup/install-conf.sh infra/uptime-kuma/kuma-ca-migrate.sh infra/uptime-kuma/kuma-auth.sh tests/uptime-kuma/*.sh tests/uptime-kuma/stubs/* \
       infra/restore-drill/restore-drill.sh \
       tests/deploy-homeautomation/*.sh infra/deploy-homeautomation/install.sh \
@@ -658,7 +701,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lldap lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lldap authelialdap lint}"; do
   for s in $section; do "check_$s"; done
 done
 

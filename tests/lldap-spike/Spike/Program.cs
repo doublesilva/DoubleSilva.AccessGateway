@@ -53,6 +53,10 @@ try
             Report.Log($"bind LDAP em {args[1]} como {args[2]}: {(ok ? "ACEITO" : "RECUSADO")}");
             report.Check($"bind em {args[1]} como {args[2]} {(args.Length > 4 ? args[4] : "aceito")}", ok == (args.Length <= 4 || args[4] != "recusado"), ok ? "aceito" : "recusado");
             break;
+        case var cv when cv.StartsWith("cv-", StringComparison.Ordinal):
+            // T09.3.7: Authelia + LLDAP pelo compose preparado, com a configuração real.
+            await new ComposeValidation(http, env, report).Run(mode, args.Skip(1).ToArray());
+            break;
         default:
             // T09.3.5: modos de resiliência e recuperação.
             await new Resilience(http, env, report).Run(mode, args.Skip(1).ToArray());
@@ -76,13 +80,19 @@ internal sealed class LabEnv
     public string ClientSecret { get; } = Get("CLIENT_SECRET");
     public string AutheliaData { get; } = Get("AUTHELIA_DATA", "/authelia-data");
 
+    // T09.3.7: parâmetros para exercitar a configuração real (domínio e cliente OIDC); padrões = laboratório.
+    public string AuthHost { get; } = Get("AUTH_HOST", "auth.example.test");
+    public string OidcClientId { get; } = Get("OIDC_CLIENT_ID", "lab-app");
+    public string OidcRedirect { get; } = Get("OIDC_REDIRECT", "https://app.example.test/cb");
+    public bool OidcPkce { get; } = Get("OIDC_PKCE", "0") == "1";
+
     private static string Get(string name, string? fallback = null) =>
         Environment.GetEnvironmentVariable(name) ?? fallback ?? throw new InvalidOperationException($"{name} ausente");
 }
 
 internal static class Users
 {
-    public const string BaseDn = "dc=example,dc=test";
+    public static readonly string BaseDn = Environment.GetEnvironmentVariable("LAB_BASE_DN") ?? "dc=example,dc=test";
     public const string AlicePassword0 = "Lab-Alice-0";
     public static string PasswordOf(string user) => $"Lab-{user}-0";
 }
@@ -258,7 +268,7 @@ internal sealed class Scenarios(HttpClient http, LabEnv env, Report report)
                 {
                     r = await alice.ChangePassword(next);
                 }
-                catch (InvalidOperationException e) when (e.Message.StartsWith("elevação 403", StringComparison.Ordinal))
+                catch (InvalidOperationException e) when (e.Message.StartsWith("elevação 403", StringComparison.Ordinal) || e.Message.StartsWith("elevação (código) 403", StringComparison.Ordinal))
                 {
                     // A sessão da alice deixou de existir no Authelia: registra e entra de novo para seguir medindo.
                     sessionLost++;
@@ -694,15 +704,17 @@ internal sealed partial class Session(HttpClient http, LabEnv env, string userna
         return ChangeOutcome.Failed;
     }
 
-    private const string OidcRedirect = "https://app.example.test/cb";
-
     /// <summary>Fluxo authorization code do cliente OIDC fictício; devolve o claim sub do id_token.</summary>
     public async Task<string> OidcSub() => SubOf((await OidcLogin("openid profile groups")).GetProperty("id_token").GetString()!);
 
     /// <summary>Autorização (com a sessão atual) + troca do code; devolve a resposta do endpoint de token.</summary>
     public async Task<JsonElement> OidcLogin(string scope)
     {
-        var path = $"/api/oidc/authorization?client_id=lab-app&redirect_uri={Uri.EscapeDataString(OidcRedirect)}&response_type=code&scope={Uri.EscapeDataString(scope)}&state=lab-state-123456&nonce=lab-nonce-123456";
+        // PKCE S256 quando o cliente exige (T09.3.7: homeautomation-panel com require_pkce).
+        var verifier = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var challenge = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(Encoding.ASCII.GetBytes(verifier))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var pkce = env.OidcPkce ? $"&code_challenge={challenge}&code_challenge_method=S256" : "";
+        var path = $"/api/oidc/authorization?client_id={env.OidcClientId}&redirect_uri={Uri.EscapeDataString(env.OidcRedirect)}&response_type=code&response_mode=query&scope={Uri.EscapeDataString(scope)}&state=lab-state-123456&nonce=lab-nonce-123456{pkce}";
         var code = "";
         for (var hop = 0; hop < 3 && code.Length == 0; hop++)
         {
@@ -722,7 +734,7 @@ internal sealed partial class Session(HttpClient http, LabEnv env, string userna
 
             // offline_access exige consentimento explícito mesmo com consent_mode implicit: aceita como o portal.
             using var consent = await Send(HttpMethod.Post, "/api/oidc/consent",
-                new { flow_id = flow, client_id = "lab-app", consent = true, pre_configure = false, claims = Array.Empty<string>() });
+                new { flow_id = flow, client_id = env.OidcClientId, consent = true, pre_configure = false, claims = Array.Empty<string>() });
             var body = await consent.Content.ReadFromJsonAsync<JsonElement>();
             var next = body.GetProperty("data").GetProperty("redirect_uri").GetString()!;
             path = new Uri(next).PathAndQuery;
@@ -733,18 +745,24 @@ internal sealed partial class Session(HttpClient http, LabEnv env, string userna
             throw new InvalidOperationException("autorização OIDC sem code após consentimento");
         }
 
-        return await Token(new Dictionary<string, string>
+        var form = new Dictionary<string, string>
         {
             ["grant_type"] = "authorization_code",
             ["code"] = Uri.UnescapeDataString(code),
-            ["redirect_uri"] = OidcRedirect,
-        });
+            ["redirect_uri"] = env.OidcRedirect,
+        };
+        if (env.OidcPkce)
+        {
+            form["code_verifier"] = verifier;
+        }
+
+        return await Token(form);
     }
 
     /// <summary>Endpoint de token com as credenciais do cliente (sem cookie de sessão).</summary>
     public async Task<JsonElement> Token(Dictionary<string, string> form)
     {
-        form["client_id"] = "lab-app";
+        form["client_id"] = env.OidcClientId;
         form["client_secret"] = env.ClientSecret;
         using var tokenReq = Request(HttpMethod.Post, "/api/oidc/token", null);
         tokenReq.Content = new FormUrlEncodedContent(form);
@@ -754,6 +772,19 @@ internal sealed partial class Session(HttpClient http, LabEnv env, string userna
         if (!tokenRes.IsSuccessStatusCode)
         {
             throw new InvalidOperationException($"token {(int)tokenRes.StatusCode}: {body}");
+        }
+
+        return JsonDocument.Parse(body).RootElement.Clone();
+    }
+
+    /// <summary>GET autenticado pela sessão; devolve o JSON.</summary>
+    public async Task<JsonElement> GetJson(string path)
+    {
+        using var res = await Send(HttpMethod.Get, path, null);
+        var body = await res.Content.ReadAsStringAsync();
+        if (!res.IsSuccessStatusCode || body.Length == 0)
+        {
+            throw new InvalidOperationException($"GET {path}: {(int)res.StatusCode} corpo={body.Length} bytes {res.Content.Headers.ContentType}");
         }
 
         return JsonDocument.Parse(body).RootElement.Clone();
@@ -797,9 +828,9 @@ internal sealed partial class Session(HttpClient http, LabEnv env, string userna
     private HttpRequestMessage Request(HttpMethod method, string path, object? body)
     {
         var req = new HttpRequestMessage(method, path);
-        req.Headers.Host = "auth.example.test";
+        req.Headers.Host = env.AuthHost;
         req.Headers.Add("X-Forwarded-Proto", "https");
-        req.Headers.Add("X-Forwarded-Host", "auth.example.test");
+        req.Headers.Add("X-Forwarded-Host", env.AuthHost);
         req.Headers.Add("X-Forwarded-For", "192.0.2.10");
         if (_cookie is not null)
         {

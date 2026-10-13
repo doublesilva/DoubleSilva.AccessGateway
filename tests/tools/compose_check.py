@@ -2,6 +2,8 @@
 
 Uso: python compose_check.py rendered.json                (render normal: o LLDAP NÃO pode aparecer)
      python compose_check.py rendered.json --expect-lldap (render com --profile lldap, T09.3.6)
+     python compose_check.py rendered.json --expect-lldap-cutover
+                                    (render com -f compose.lldap.yml --profile lldap, T09.3.7: Authelia no LDAP)
 
 Regras:
   - LLDAP (T09.3.6) só no perfil "lldap": ausente do render normal (o deploy não o sobe); no render do perfil, sem
@@ -55,12 +57,42 @@ def check_lldap(svc, errors):
          and mounts.get("/data", {}).get("source", "").replace("\\", "/").endswith("/data/lldap"), "dados fora de .../data/lldap (rw)")
 
 
+def authelia_config_source(svc):
+    mounts = [v for v in svc.get("volumes", []) if v.get("target") == "/config/configuration.yml"]
+    return (mounts[0]["source"].replace("\\", "/"), mounts[0].get("read_only")) if len(mounts) == 1 else (None, None)
+
+
+def check_authelia_backend(svc, cutover, errors):
+    """Normal: configuration.yml (backend file), sem depender do LLDAP. Cutover (T09.3.7): configuration.ldap.yml,
+    senha LDAP por arquivo e depends_on lldap saudável."""
+    source, ro = authelia_config_source(svc)
+    env = svc.get("environment", {})
+    deps = svc.get("depends_on", {})
+    if not ro:
+        errors.append(f"authelia: configuração não montada uma única vez e somente leitura ({source})")
+    if cutover:
+        if not (source or "").endswith("/authelia/configuration.ldap.yml"):
+            errors.append(f"authelia (cutover): configuração {source}, esperada authelia/configuration.ldap.yml")
+        if env.get("AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE") != "/secrets/LDAP_PASSWORD":
+            errors.append("authelia (cutover): senha LDAP deve vir de /secrets/LDAP_PASSWORD")
+        if deps.get("lldap", {}).get("condition") != "service_healthy":
+            errors.append(f"authelia (cutover): deve esperar o lldap saudável (depends_on={deps})")
+    else:
+        if not (source or "").endswith("/authelia/configuration.yml"):
+            errors.append(f"authelia: configuração {source}; o deploy normal usa authelia/configuration.yml (backend file)")
+        if "lldap" in deps or any(k.startswith("AUTHELIA_AUTHENTICATION_BACKEND_LDAP") for k in env):
+            errors.append("authelia: o deploy normal não pode depender do LLDAP")
+    if "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD" in env:
+        errors.append("authelia: senha LDAP em variável de ambiente")
+
+
 def main():
     with open(sys.argv[1], encoding="utf-8") as f:
         config = json.load(f)
     services = config["services"]
     errors = []
-    expect_lldap = "--expect-lldap" in sys.argv[2:]
+    cutover = "--expect-lldap-cutover" in sys.argv[2:]
+    expect_lldap = cutover or "--expect-lldap" in sys.argv[2:]
     if expect_lldap:
         if "lldap" in services:
             check_lldap(services["lldap"], errors)
@@ -68,6 +100,7 @@ def main():
             errors.append("lldap ausente do render com --profile lldap")
     elif "lldap" in services:
         errors.append("lldap no render normal: o deploy o iniciaria (deve ficar só no perfil 'lldap')")
+    check_authelia_backend(services["authelia"], cutover, errors)
 
     caddy = services["caddy"]
     env = caddy.get("environment", {})
