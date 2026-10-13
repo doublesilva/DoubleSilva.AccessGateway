@@ -1,0 +1,19 @@
+# T09.3.4 — Fase "depois da migração": LLDAP. Senha da conta de serviço por
+# AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD.
+#
+# - refresh_interval 'always': grupos e desativação valem na próxima requisição de cada sessão (padrão: 5m).
+# - LLDAP não tem atributo de conta desativada: desativar = pertencer ao grupo 'disabled', excluído no users_filter.
+# - A conta 'authelia' fica em lldap_password_manager: o Authelia troca senhas com Password Modify (RFC 3062)
+#   usando a conta de serviço.
+authentication_backend:
+  password_reset:
+    disable: true
+
+  refresh_interval: 'always'
+
+  ldap:
+    implementation: 'lldap'
+    address: 'ldap://lldap:3890'
+    base_dn: 'dc=example,dc=test'
+    users_filter: '(&(|({username_attribute}={input})({mail_attribute}={input}))(objectClass=person)(!(memberOf=cn=disabled,ou=groups,dc=example,dc=test)))'
+    user: 'uid=authelia,ou=people,dc=example,dc=test'

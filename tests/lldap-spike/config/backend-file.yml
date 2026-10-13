@@ -1,0 +1,10 @@
+# T09.3.4 — Fase "antes da migração": backend file, como a produção hoje.
+authentication_backend:
+  password_reset:
+    disable: true
+
+  file:
+    path: '/data/users_database.yml'
+    watch: true
+    password:
+      algorithm: argon2

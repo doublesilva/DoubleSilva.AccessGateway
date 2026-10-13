@@ -1,0 +1,69 @@
+# T09.3.4 — Spike Authelia 4.39.28 + LLDAP: parte comum aos dois backends (file e ldap).
+# Domínio, usuários, grupos e segredos fictícios (segredos gerados por execução em run.sh). Requer
+# X_AUTHELIA_CONFIG_FILTERS=template. Só no ensaio: log debug, sem limite de taxa na elevação, sem banimento.
+
+server:
+  address: 'tcp://0.0.0.0:9091/'
+  endpoints:
+    rate_limits:
+      session_elevation_start:
+        enable: false
+      session_elevation_finish:
+        enable: false
+
+log:
+  level: debug
+
+access_control:
+  default_policy: deny
+  rules:
+    - domain: 'admin.example.test'
+      subject:
+        - 'group:home-admin'
+      policy: one_factor
+    - domain: 'app.example.test'
+      subject:
+        - 'group:home-admin'
+        - 'group:home-user'
+      policy: one_factor
+
+session:
+  cookies:
+    - domain: 'example.test'
+      authelia_url: 'https://auth.example.test'
+
+regulation:
+  max_retries: 1000
+
+storage:
+  local:
+    path: '/data/db.sqlite3'
+
+notifier:
+  filesystem:
+    filename: '/data/notification.txt'
+
+identity_providers:
+  oidc:
+    jwks:
+      - algorithm: 'RS256'
+        use: 'sig'
+        key: {{ secret "/secrets/jwks.key" | mindent 10 "|" | msquote }}
+    clients:
+      - client_id: 'lab-app'
+        client_name: 'Lab App'
+        client_secret: '{{ secret "/secrets/client.digest" }}'
+        public: false
+        authorization_policy: 'one_factor'
+        consent_mode: 'implicit'
+        redirect_uris:
+          - 'https://app.example.test/cb'
+        scopes:
+          - 'openid'
+          - 'profile'
+          - 'groups'
+        grant_types:
+          - 'authorization_code'
+        response_types:
+          - 'code'
+        token_endpoint_auth_method: 'client_secret_post'
