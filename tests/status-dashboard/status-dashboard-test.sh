@@ -60,7 +60,7 @@ check "nenhuma unit toca no home-smoke-publish ou no timer" bash -c "! grep -hvE
 export RS=/tmp/rs PATH="/tmp/rs-stubs:$PATH" GATEWAY_ROOT=/tmp/gw ALLOW_NON_ROOT=0
 install -d /tmp/rs-stubs && cp /repo/tests/status-dashboard/stubs/* /tmp/rs-stubs/ && chmod +x /tmp/rs-stubs/*
 mkdir -p /tmp/gw/app/tests/tools /tmp/gw/logs /etc/homeautomation/certs
-cp /repo/tests/tools/caddy_parity.py /tmp/gw/app/tests/tools/
+cp /repo/tests/tools/caddy_parity.py /repo/tests/tools/kuma_alias_check.py /tmp/gw/app/tests/tools/
 printf 'GATEWAY_MODE=cutover\nGATEWAY_ADMIN_PORT=2020\nAUTHELIA_HOST_PORT=19091\n' > /tmp/gw/accessgateway.env
 touch /etc/homeautomation/certs/caddy-local-root.crt
 RELOAD="bash /repo/scripts/caddy-reload.sh"
@@ -134,6 +134,19 @@ rs_reset kbad krun
 if $RELOAD --check --expect-host kuma.home > /tmp/rl.log 2>&1; then bad "--expect-host kuma.home não pode aceitar mudança em outro host"; else ok "reload --check --expect-host kuma.home: mudança em outro host recusada"; fi
 rs_reset knew krun
 check "reload --apply --expect-host kuma.home: recarrega e valida" bash -c "$RELOAD --apply --expect-host kuma.home | grep -q 'APPLY concluído' && cmp -s $RS/running.json /tmp/fx-knew.json"
+# Revert seguro: a configuração salva tem o alias ABERTO (krun); o revert recarrega tudo dela, mas o kuma.home só com 301
+KSAVED=$(ls /tmp/gw/logs/caddy-config-*.json | head -1)
+check "reload --revert com o alias aberto salvo: kuma.home recarregado FECHADO (só 301), resto da configuração salva" bash -c "
+  $RELOAD --revert '$KSAVED' | tee /tmp/rv.log | grep -q 'REVERT concluído' && grep -q 'kuma.home FECHADO no revert' /tmp/rv.log &&
+  python3 - '$RS/running.json' '$KSAVED' <<'PY'
+import json, sys
+now, saved = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
+rn, rs = now['apps']['http']['servers']['srv0']['routes'], saved['apps']['http']['servers']['srv0']['routes']
+host = lambda r: {h for m in r.get('match', []) for h in m.get('host', [])}
+k = [r for r in rn if host(r) == {'kuma.home'}]
+assert len(k) == 1 and '3001' not in json.dumps(k[0]) and '\"status_code\": 301' in json.dumps(k[0]), k
+assert [r for r in rn if host(r) != {'kuma.home'}] == [r for r in rs if host(r) != {'kuma.home'}]
+PY"
 
 printf '\nRESULTADO: %d PASS, %d FAIL\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

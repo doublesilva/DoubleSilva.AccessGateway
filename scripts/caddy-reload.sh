@@ -5,7 +5,8 @@
 #   caddy-reload.sh --check                    valida o Caddyfile instalado DENTRO do container e compara com a
 #                                              configuração em execução: só as rotas declaradas em --expect podem mudar
 #   caddy-reload.sh --apply                    salva a configuração em execução, recarrega e valida
-#   caddy-reload.sh --revert <config.json>     recarrega uma configuração salva pelo --apply (desfaz na hora)
+#   caddy-reload.sh --revert <config.json>     recarrega uma configuração salva pelo --apply (desfaz na hora); o alias
+#                                              kuma.home nunca volta aberto (T07.6.1: só 301, push suspenso)
 #   opções: --expect HOST:CAMINHO (repetível; padrão: as rotas /status do admin, T06.4, quando não há --expect-host)
 #           --expect-host HOST    (repetível) o host inteiro pode mudar (ex.: kuma.home, T07.6.1); o resto tem de ser idêntico
 #
@@ -33,6 +34,7 @@ done
 [ "${ALLOW_NON_ROOT:-}" = 1 ] || require_root
 PYTHON=${PYTHON:-python3}
 PARITY="$GATEWAY_APP_DIR/tests/tools/caddy_parity.py"
+KUMA_ALIAS="$GATEWAY_APP_DIR/tests/tools/kuma_alias_check.py"
 load_env
 ADMIN="localhost:${GATEWAY_ADMIN_PORT:?GATEWAY_ADMIN_PORT ausente no arquivo de ambiente}"
 UPSTREAM="127.0.0.1:${AUTHELIA_HOST_PORT:-19091}"
@@ -92,8 +94,13 @@ case "$ACTION" in
   revert)
     [ -s "$SAVED" ] || die "informe a configuração salva: --revert $GATEWAY_LOG_DIR/caddy-config-<data>.json"
     "$PYTHON" -m json.tool "$SAVED" > /dev/null || die "$SAVED não é JSON válido"
+    # T07.6.1: o Kuma não tem login próprio (SSO só pelo Authelia). O revert nunca volta ao alias kuma.home aberto:
+    # se a configuração salva o tiver, ele é recarregado só com o 301 (push pelo alias suspenso até a correção).
+    "$PYTHON" "$KUMA_ALIAS" --close-if-open "$SAVED" "$WORK/revert.json" > "$WORK/alias.log" \
+      || die "não foi possível preparar o revert seguro do kuma.home; nada alterado"
+    log "$(cat "$WORK/alias.log")"
     docker exec -i "$GREEN_CADDY" wget -qO- --header 'Content-Type: application/json' --post-file=/dev/stdin \
-      "http://$ADMIN/load" < "$SAVED" > "$WORK/load.log" 2>&1 || { tail -5 "$WORK/load.log"; die "POST /load recusado"; }
+      "http://$ADMIN/load" < "$WORK/revert.json" > "$WORK/load.log" 2>&1 || { tail -5 "$WORK/load.log"; die "POST /load recusado"; }
     log "configuração $SAVED recarregada"
     post_checks "$before" || die "validação pós-revert falhou"
     log "REVERT concluído. Para torná-lo permanente, restaure os arquivos caddy/ da release anterior."

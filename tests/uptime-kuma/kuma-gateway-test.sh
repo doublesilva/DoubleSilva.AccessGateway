@@ -6,8 +6,10 @@
 #                                  interface, Socket.IO, /metrics, badges, status pages, uploads, métodos e caminhos
 #                                  forjados → 301 para kuma.home.doublesilva.com (nada administrativo responde 200);
 #                                  Host ≠ SNI não contorna; host autenticado sem sessão ou com cookie inválido → portal
-#   kuma-gateway-test.sh session   com sessão home-admin de teste: o host autenticado entrega o Kuma; logout → portal
-# Arquivos em /e2e: kuma-push-token (token fictício do push do smoke), green-test-admin.password; grava kuma-admin.jar.
+#   kuma-gateway-test.sh session   SSO exclusivo (disableAuth=true): home-admin entra só com a sessão do Authelia (interface e
+#                                  /metrics 200); sem sessão → portal; home-user → 403 em tudo (inclusive Socket.IO e push)
+#   kuma-gateway-test.sh logout    logout no Authelia → portal
+# Arquivos em /e2e: kuma-push-token (token fictício), green-test-admin.password e green-test-user.password; grava os jars.
 set -Eeuo pipefail
 CA=${GATEWAY_CA:?}
 PORT=18443
@@ -80,8 +82,22 @@ session_tests() {
   [ "$code" = 200 ] && ok "home-admin de teste: primeiro fator 200" || { bad "primeiro fator: $code"; return; }
   r=$(c kuma.home.doublesilva.com -b "$jar" -o /tmp/kuma.html -w '%{http_code}' "$KUMA_GW/dashboard" || echo 000)
   [ "$r" = 200 ] && grep -qi 'uptime kuma' /tmp/kuma.html && ok "home-admin: $KUMA_GW entrega a interface do Kuma (200)" || bad "home-admin no Kuma: $r"
+  # SSO exclusivo (disableAuth=true): a sessão home-admin do Authelia é a única barreira; não há segunda tela de login
   r=$(c kuma.home.doublesilva.com -b "$jar" -o /dev/null -w '%{http_code}' "$KUMA_GW/metrics" || echo 000)
-  [ "$r" = 401 ] && ok "home-admin sem login do Kuma: /metrics 401 (a autenticação do Kuma vale atrás do gateway)" || bad "/metrics com sessão do Authelia: $r"
+  [ "$r" = 200 ] && ok "home-admin: /metrics 200 só com a sessão do Authelia (SSO, sem login próprio)" || bad "/metrics com sessão do Authelia: $r"
+  r=$(code_loc kuma.home.doublesilva.com "$KUMA_GW/metrics")
+  [[ "$r" == "302 $AUTH/?rd="* ]] && ok "sem sessão: /metrics 302 para o portal" || bad "/metrics sem sessão: $r"
+
+  local ujar=/e2e/kuma-user.jar
+  code=$(python3 -c 'import json; print(json.dumps({"username": "green-teste", "password": open("/e2e/green-test-user.password").read(), "keepMeLoggedIn": False}))' \
+    | c auth.home.doublesilva.com -o /dev/null -w '%{http_code}' -c "$ujar" -H 'Content-Type: application/json' --data-binary @- "$AUTH/api/firstfactor" || echo 000)
+  [ "$code" = 200 ] && ok "home-user de teste: primeiro fator 200" || { bad "primeiro fator home-user: $code"; return; }
+  local all=1 p
+  for p in /dashboard /metrics '/socket.io/?EIO=4&transport=polling' "/api/push/$TOKEN?status=up"; do
+    r=$(c kuma.home.doublesilva.com -b "$ujar" -o /dev/null -w '%{http_code}' "$KUMA_GW$p" || echo 000)
+    [ "$r" = 403 ] || { all=0; bad "home-user em ${p//$TOKEN/<token>}: $r (esperado 403)"; }
+  done
+  [ "$all" = 1 ] && ok "home-user (sem home-admin): 403 na interface, /metrics, Socket.IO e push pelo host autenticado"
 }
 
 logout_tests() {

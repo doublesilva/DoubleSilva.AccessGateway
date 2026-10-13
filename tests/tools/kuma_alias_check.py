@@ -1,6 +1,7 @@
 """Confere, no JSON adaptado da Green, o contrato do alias kuma.home (T07.6.1).
 
 Uso: python kuma_alias_check.py green.json
+     python kuma_alias_check.py --close-if-open salvo.json saida.json   (revert seguro do caddy-reload.sh)
 
 O alias só pode ter duas rotas, nesta ordem:
   1. GET/POST com o caminho NORMALIZADO (path_regexp) e o CRU (expression) iguais a /api/push/<token alfanumérico>
@@ -30,11 +31,13 @@ def leaf(route):
     return handle
 
 
-def main():
-    with open(sys.argv[1], encoding="utf-8") as f:
-        config = json.load(f)
-    routes = [r for s in config["apps"]["http"]["servers"].values() for r in s.get("routes", [])
-              if {h for m in r.get("match", []) for h in m.get("host", [])} == {HOST}]
+def alias_routes(config):
+    return [r for s in config["apps"]["http"]["servers"].values() for r in s.get("routes", [])
+            if {h for m in r.get("match", []) for h in m.get("host", [])} == {HOST}]
+
+
+def contract_problems(config):
+    routes = alias_routes(config)
     problems = []
     if len(routes) != 1:
         problems.append(f"{len(routes)} rotas de nível superior para {HOST} (esperado 1)")
@@ -53,6 +56,36 @@ def main():
                 problems.append(f"rota final com match: {rest.get('match')}")
             if leaf(rest) != REDIRECT:
                 problems.append(f"rota final: {leaf(rest)}")
+    return problems
+
+
+def close_if_open(src, dst):
+    """Revert seguro (caddy-reload.sh --revert): se o alias da configuração salva não cumpre o contrato (ex.: o proxy de
+    tudo de antes da T07.6.1), ele vira só 301 para o host autenticado, SEM push. Como o Kuma não tem login próprio
+    (SSO exclusivo pelo Authelia), voltar ao alias aberto reabriria a administração anônima. O resto não muda."""
+    with open(src, encoding="utf-8") as f:
+        config = json.load(f)
+    routes = alias_routes(config)
+    if not routes:
+        msg = f"{HOST} ausente da configuração: nada a fechar"
+    elif not contract_problems(config):
+        msg = f"{HOST} já cumpre o contrato (só push + 301): mantido"
+    else:
+        for r in routes:
+            r["handle"] = [{"handler": "subroute", "routes": [{"handle": REDIRECT}]}]
+        msg = f"{HOST} FECHADO no revert: tudo 301 para o host autenticado (push pelo alias suspenso)"
+    with open(dst, "w", encoding="utf-8") as f:
+        json.dump(config, f)
+    print(msg)
+    return 0
+
+
+def main():
+    if len(sys.argv) == 4 and sys.argv[1] == "--close-if-open":
+        return close_if_open(sys.argv[2], sys.argv[3])
+    with open(sys.argv[1], encoding="utf-8") as f:
+        config = json.load(f)
+    problems = contract_problems(config)
     if problems:
         print("CONTRATO VIOLADO: " + "; ".join(problems))
         return 1

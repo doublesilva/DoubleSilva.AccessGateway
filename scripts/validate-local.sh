@@ -80,6 +80,18 @@ for s in c["apps"]["http"]["servers"].values():
 json.dump(c, open(".tmp/validate/green-sem-expression.json", "w"))'
   if out=$(py tests/tools/kuma_alias_check.py "$TMP/green-sem-expression.json"); then bad "kuma_alias_check aceitou o alias sem o matcher do caminho cru"
   else ok "kuma_alias_check recusa o alias sem o matcher do caminho cru (contorno por normalização)"; fi
+  # Revert seguro (caddy-reload --revert): alias no contrato é mantido; alias aberto (Blue/fa0242e) vira só 301
+  if out=$(py tests/tools/kuma_alias_check.py --close-if-open "$TMP/green-prod.json" "$TMP/rv-green.json") && [[ "$out" == *mantido* ]] \
+     && py -c 'import json,sys; a,b=(json.load(open(f"/repo/.tmp/validate/{n}")) for n in ("green-prod.json","rv-green.json")); sys.exit(a!=b)'; then
+    ok "revert seguro: alias no contrato mantido sem alteração"
+  else bad "revert seguro (contrato): $out"; fi
+  if out=$(py tests/tools/kuma_alias_check.py --close-if-open "$TMP/blue.json" "$TMP/rv-blue.json") && [[ "$out" == *FECHADO* ]] \
+     && py -c 'import json,sys
+c = json.load(open("/repo/.tmp/validate/rv-blue.json"))
+k = [r for s in c["apps"]["http"]["servers"].values() for r in s["routes"] if {h for m in r.get("match", []) for h in m.get("host", [])} == {"kuma.home"}]
+sys.exit(not (len(k) == 1 and "3001" not in json.dumps(k[0]) and "301" in json.dumps(k[0])))'; then
+    ok "revert seguro: alias aberto (Blue) recarregado só com 301, sem proxy para o Kuma"
+  else bad "revert seguro (aberto): $out"; fi
 
   if py tests/tools/caddy_listen.py "$TMP/green-prep.json" --expect 127.0.0.1:18443 127.0.0.1:18080 --admin localhost:2020; then
     ok "modo preparação: somente loopback 18080/18443, admin localhost:2020"
@@ -178,8 +190,9 @@ check_ca() {
 }
 
 # T07.6.1: Uptime Kuma descartável (imagem de produção, credenciais fictícias) no namespace de rede do Caddy de teste,
-# atrás das regras reais do gateway. Usa "tester" e "root" do check_e2e (escopo dinâmico). Ordem: alias com o Kuma ainda
-# exposto (o gateway sozinho fecha) → kuma-auth.sh --apply → alias de novo → sessão home-admin + login do Kuma pelo
+# atrás das regras reais do gateway, com disableAuth=true como em produção (arquitetura: SSO exclusivo pelo Authelia, sem
+# login próprio do Kuma). Usa "tester" e "root" do check_e2e (escopo dinâmico). Ordem: alias (o gateway sozinho fecha) →
+# transição real do gateway sob carga de push → revert seguro → validate-green → sessões home-admin / home-user pelo
 # Socket.IO → logout → handshake recusado.
 e2e_kuma() {
   local kname=accessgateway-e2e-kuma kvol=accessgateway-e2e-kuma-data old_pw tok out r
@@ -191,30 +204,16 @@ e2e_kuma() {
     sh -c 'printf "{\"type\":\"sqlite\"}" > /app/data/db-config.json && exec node server/server.js' > /dev/null
   for _ in $(seq 1 120); do MSYS_NO_PATHCONV=1 docker exec "$kname" extra/healthcheck > /dev/null 2>&1 && break; sleep 1; done
   old_pw="Antiga-$(rnd 20)"; tok=$(rnd 32)
-  printf '%s\n' "$tok" > "$TMP/e2e/kuma-push-token"; printf 'Nova-%s\n' "$(rnd 24)" > "$TMP/e2e/kuma-admin-pw"
+  printf '%s\n' "$tok" > "$TMP/e2e/kuma-push-token"
   out=$(printf '%s\n%s\n%s\n' "$old_pw" "$(rnd 32)" "$tok" | MSYS_NO_PATHCONV=1 docker exec -i "$kname" node -e "$(cat tests/uptime-kuma/kuma-sandbox.js)" seed 2>&1 || true)
   if [[ "$out" != *"seed=ok"* ]]; then bad "Kuma do e2e: semeadura falhou ($out)"; docker rm -f "$kname" > /dev/null; docker volume rm "$kvol" > /dev/null; return; fi
   ok "Kuma descartável no e2e (imagem de produção) semeado com disableAuth=true, atrás do Caddy de teste"
 
   local gw=("${tester[@]}" bash /repo/tests/uptime-kuma/kuma-gateway-test.sh)
   if "${gw[@]}" alias > "$TMP/kuma-gw-alias.out" 2>&1; then
-    ok "kuma.home com o Kuma ainda exposto: o gateway sozinho só entrega o push ($(grep -c '^\[PASS\]' "$TMP/kuma-gw-alias.out") verificações)"
+    ok "kuma.home com disableAuth=true (SSO): o gateway sozinho só entrega o push ($(grep -c '^\[PASS\]' "$TMP/kuma-gw-alias.out") verificações)"
   else
-    bad "kuma.home (Kuma exposto): $(grep -E '^\[FAIL\]' "$TMP/kuma-gw-alias.out" | head -6)"
-  fi
-
-  printf '#!/bin/sh\necho "[PASS] Kuma         /var/backups/home-server/current/sqlite/uptime-kuma/kuma.db"\n' > "$TMP/kuma-cov.sh"
-  if MSYS_NO_PATHCONV=1 ALLOW_NON_ROOT=1 KUMA_CONTAINER="$kname" KUMA_EXPECTED_IMAGE="$(docker image inspect -f '{{.Id}}' "$KUMA_IMAGE")" \
-       KUMA_COVERAGE_CMD="$TMP/kuma-cov.sh" KUMA_BACKUPS="$TMP/kuma-backups" GATEWAY_ROOT="$TMP/e2e" \
-       KUMA_ADMIN_PASSWORD_FILE="$TMP/e2e/kuma-admin-pw" bash infra/uptime-kuma/kuma-auth.sh --apply > "$TMP/kuma-gw-apply.out" 2>&1; then
-    ok "kuma-auth.sh --apply no Kuma atrás do gateway"
-  else
-    bad "kuma-auth.sh --apply (e2e): $(grep -E 'FALHA|ERRO' "$TMP/kuma-gw-apply.out" | head -4)"
-  fi
-  if "${gw[@]}" alias > "$TMP/kuma-gw-alias2.out" 2>&1; then
-    ok "kuma.home depois do --apply: push pelo gateway continua funcionando; o resto segue fechado"
-  else
-    bad "kuma.home após o apply: $(grep -E '^\[FAIL\]' "$TMP/kuma-gw-alias2.out" | head -6)"
+    bad "kuma.home: $(grep -E '^\[FAIL\]' "$TMP/kuma-gw-alias.out" | head -6)"
   fi
 
   # Transição real do gateway (item 10 da homologação): Caddy de teste com a configuração ANTERIOR (release fa0242e,
@@ -244,6 +243,27 @@ e2e_kuma() {
     bad "configuração anterior do Caddy não carregou no e2e (kuma.home/dashboard $r, esperado 200 do alias aberto)"
   fi
 
+  # Revert seguro no Caddy REAL: a configuração anterior (alias aberto), passada pelo --close-if-open do caddy-reload,
+  # carrega e deixa o kuma.home todo em 301 (interface, Socket.IO e o próprio push). Depois volta à configuração nova.
+  MSYS_NO_PATHCONV=1 docker exec "$cad" caddy adapt --config /tmp/caddy-anterior/Caddyfile --adapter caddyfile > "$TMP/rv-anterior.json" 2>/dev/null
+  if out=$(py tests/tools/kuma_alias_check.py --close-if-open "$TMP/rv-anterior.json" "$TMP/rv-fechado.json") \
+     && MSYS_NO_PATHCONV=1 docker cp "$TMP/rv-fechado.json" "$cad:/tmp/rv-fechado.json" > "$TMP/rv-load.log" 2>&1 \
+     && MSYS_NO_PATHCONV=1 docker exec "$cad" wget -qO- --header 'Content-Type: application/json' --post-file=/tmp/rv-fechado.json \
+          http://127.0.0.1:2020/load >> "$TMP/rv-load.log" 2>&1; then   # 127.0.0.1: no bridge do e2e, localhost → ::1
+    local rv_ok=1 p
+    for p in /dashboard "/socket.io/?EIO=4&transport=polling" /metrics "/api/push/$(cat "$TMP/e2e/kuma-push-token")?status=up"; do
+      r=$(curl -sS -o "$null_out" --max-time 10 "${curl_tls[@]}" --connect-to kuma.home:443:127.0.0.1:18443 -w '%{http_code}' "https://kuma.home$p" 2>/dev/null || echo 000)
+      [ "$r" = 301 ] || { rv_ok=0; bad "revert seguro: kuma.home${p%%/api/push/*}… $r (esperado 301)"; }
+    done
+    r=$(curl -sS -o "$null_out" --max-time 10 "${curl_tls[@]}" --connect-to kuma.home.doublesilva.com:443:127.0.0.1:18443 -w '%{http_code}' https://kuma.home.doublesilva.com/dashboard 2>/dev/null || echo 000)
+    [ "$r" = 302 ] || { rv_ok=0; bad "revert seguro: host autenticado $r (esperado 302)"; }
+    [ "$rv_ok" = 1 ] && ok "revert seguro no Caddy real: configuração anterior com o kuma.home todo em 301 (push suspenso); host autenticado 302"
+  else
+    bad "revert seguro no Caddy real: $out | $(head -c 300 "$TMP/rv-load.log" 2>/dev/null) | adapt: $(head -c 120 "$TMP/rv-anterior.json")"
+  fi
+  MSYS_NO_PATHCONV=1 docker exec "$cad" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --address localhost:2020 > /dev/null 2>&1 \
+    || bad "não voltou à configuração nova depois do revert"
+
   # A verificação externa usada na implantação (validate-green: classes de tests/routes.tsv + contorno por normalização)
   if "${tester[@]}" bash /repo/scripts/validate-green.sh --https-port 18443 --http-port 18080 --blue-https-port 18443 \
        > "$TMP/kuma-gw-validate-green.out" 2>&1; then
@@ -253,7 +273,7 @@ e2e_kuma() {
   fi
 
   local sock=(docker run --rm "${gw_net[@]}" -v "$root:/e2e:ro" "$KUMA_IMAGE" node -e "$(cat tests/uptime-kuma/kuma-gateway-socket.js)")
-  for step_ in "session:gw" "sessao:sock" "logout:gw" "sem-sessao:sock"; do
+  for step_ in "session:gw" "sessao:sock" "usuario:sock" "logout:gw" "sem-sessao:sock"; do
     if [ "${step_#*:}" = gw ]; then
       "${gw[@]}" "${step_%%:*}" > "$TMP/kuma-gw-${step_%%:*}.out" 2>&1 && r=0 || r=$?
     else
@@ -270,12 +290,12 @@ e2e_kuma() {
     fi
   done
 
-  printf '%s\n' "$old_pw" "$tok" > "$TMP/kuma-segredos.pat"; head -1 "$TMP/e2e/kuma-admin-pw" >> "$TMP/kuma-segredos.pat"
+  printf '%s\n' "$old_pw" "$tok" > "$TMP/kuma-segredos.pat"
   docker logs "$kname" > "$TMP/kuma-e2e.log" 2>&1
   if grep -qFf "$TMP/kuma-segredos.pat" "$TMP/kuma-e2e.log" "$TMP"/kuma-gw-*.out; then bad "segredo do Kuma de teste em log ou saída"
   else ok "logs do Kuma e saídas sem senhas nem token de push"; fi
   docker rm -f "$kname" > /dev/null; docker volume rm "$kvol" > /dev/null
-  rm -f "$TMP/e2e/kuma-admin-pw" "$TMP/e2e/kuma-push-token" "$TMP/e2e/kuma-admin.jar" "$TMP/kuma-segredos.pat"
+  rm -f "$TMP/e2e/kuma-push-token" "$TMP/e2e/kuma-admin.jar" "$TMP/e2e/kuma-user.jar" "$TMP/kuma-segredos.pat"
 }
 
 check_e2e() {
