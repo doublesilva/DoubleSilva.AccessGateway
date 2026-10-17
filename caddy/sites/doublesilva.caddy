@@ -97,3 +97,7 @@ jarvis.home.doublesilva.com {
 
 	reverse_proxy 127.0.0.1:5500
 }
+
+saldo360.home.doublesilva.com {
+    reverse_proxy 127.0.0.1:5600
+}
