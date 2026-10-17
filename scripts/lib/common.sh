@@ -19,9 +19,52 @@ BLUE_AUTHELIA_CONFIG=$BLUE_AUTHELIA_DIR/config/configuration.yml
 # Baseline coletada na T01/T02 (2026-10-10).
 EXPECTED_ROOT_FP="${ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP:-AD:F8:85:14:FF:96:F1:71:93:E3:84:90:8F:A4:43:42:FE:7F:62:48:53:79:32:14:44:A8:8C:B2:D9:C2:38:56}"
 BLUE_CADDYFILE_SHA256=97138770033ff281944f0dfa32ba6437e97a3ff2184edf37f7bacdd9042a492a # gitleaks:allow (hash público para detectar deriva)
-BLUE_AUTHELIA_CONFIG_SHA256=e0d721766e31663a58285916027e1ccecdc385d563e1b9a7b0fe6947c92ec16b # gitleaks:allow (hash público para detectar deriva)
+# R2.1: Caddyfile da Blue com o alias kuma.home fechado (infra/blue-rollback/Caddyfile), instalado pelo rollback --cutover
+BLUE_ROLLBACK_CADDYFILE_SHA256=05782327499dceb9d103461b69ca4cc067ad80d495fb181a2f2be12611238700 # gitleaks:allow (hash público)
+BLUE_AUTHELIA_CONFIG_SHA256="${ACCESSGATEWAY_TEST_BLUE_AUTHELIA_SHA256:-e0d721766e31663a58285916027e1ccecdc385d563e1b9a7b0fe6947c92ec16b}" # gitleaks:allow (hash público para detectar deriva)
 
 OIDC_CLIENTS=(homeautomation-panel homeautomation-outhome jarvis-home saldo360)
+
+# Green e cutover (T04)
+GREEN_CADDY=accessgateway-caddy
+GREEN_AUTHELIA=accessgateway-authelia
+GATEWAY_LOG_DIR="${GATEWAY_LOG_DIR:-$GATEWAY_ROOT/logs}"
+GATEWAY_PREP_ENV_BACKUP="$GATEWAY_ROOT/accessgateway.prep.env"
+CA_PUBLIC=/etc/homeautomation/certs/caddy-local-root.crt
+LAN_IP=192.168.0.162
+TAILSCALE_IP=100.115.190.21
+TEST_USER_NAMES=(green-teste green-admin-teste)
+# Smoke do servidor (home-smoke-test). Sem falhas toleradas desde a T06.3: as 3 falhas do baseline T01 foram corrigidas
+# na T06.2 e as 2 do container "caddy" na T06.1. Aprovado só com saída 0, nenhum [FAIL] e ao menos um [PASS].
+SMOKE_CMD=${SMOKE_CMD:-/usr/local/sbin/home-smoke-test}
+
+# Porta HTTPS publicada pelo Caddy da Green (vazio se não estiver em execução)
+green_https_port() { docker inspect "$GREEN_CADDY" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^GATEWAY_HTTPS_PORT=//p'; }
+
+# Estado do gateway de produção: blue | green | nenhum | ambos (anômalo)
+production_owner() {
+  local blue=0 green=0
+  container_running caddy && blue=1
+  container_running "$GREEN_CADDY" && [ "$(green_https_port)" = 443 ] && green=1
+  case "$blue$green" in 10) echo blue ;; 01) echo green ;; 00) echo nenhum ;; *) echo ambos ;; esac
+}
+
+# Código HTTP de https://<host><caminho> num IP/porta (validação de TLS pela raiz pública)
+https_code() { # host caminho [porta] [ip]
+  curl -sS -o /dev/null -w '%{http_code}' --max-time 5 --cacert "$CA_PUBLIC" \
+    --connect-to "$1:443:${4:-127.0.0.1}:${3:-443}" "https://$1$2" 2>/dev/null || echo 000
+}
+
+test_users_present() { local u; for u in "${TEST_USER_NAMES[@]}"; do grep -qE "^  $u:[[:space:]]*$" "$1" && return 0; done; return 1; }
+
+smoke_run() { # executa o smoke; define SMOKE_OUT (sem cores), SMOKE_RC, SMOKE_PASS e SMOKE_FAIL
+  SMOKE_RC=0
+  SMOKE_OUT=$($SMOKE_CMD 2>&1) || SMOKE_RC=$?
+  SMOKE_OUT=$(sed 's/\x1b\[[0-9;]*m//g' <<<"$SMOKE_OUT")
+  SMOKE_PASS=$(grep -c '^\[PASS\]' <<<"$SMOKE_OUT" || true)
+  SMOKE_FAIL=$(grep -c '^\[FAIL\]' <<<"$SMOKE_OUT" || true)
+}
+smoke_ok() { [ "$SMOKE_RC" -eq 0 ] && [ "$SMOKE_FAIL" -eq 0 ] && [ "$SMOKE_PASS" -gt 0 ]; }
 
 log()  { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { printf '[%s] AVISO: %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
@@ -59,14 +102,61 @@ key_matches_cert() {
 }
 
 container_running() { [ "$(docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
+container_exists()  { docker inspect --format '{{.State.Running}}' "$1" > /dev/null 2>&1; }
+restart_policy()    { docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$1" 2>/dev/null; }
+health_status()     { docker inspect --format '{{.State.Health.Status}}' "$1" 2>/dev/null; }
+
+# Fase da Blue depois do cutover (R2.1). Imprime:
+#   standby   Authelia da Blue em execução e saudável, com restart; Caddy da Blue parado com restart=no (R0/R1)
+#   r2        Authelia e Caddy da Blue parados, ambos com restart=no (R2 executada)
+#   r4        containers da Blue removidos (R4)
+#   inconsistente:<motivo>  qualquer outra combinação (ex.: Authelia religado fora do procedimento, parada sem a R2)
+blue_phase() {
+  local ae ce apol cpol
+  container_exists authelia && ae=1 || ae=0
+  container_exists caddy && ce=1 || ce=0
+  [ "$ae$ce" = 00 ] && { echo r4; return; }
+  [ "$ae$ce" = 11 ] || { echo "inconsistente:remoção parcial (authelia=$ae, caddy=$ce)"; return; }
+  container_running caddy && { echo "inconsistente:Caddy da Blue em execução"; return; }
+  cpol=$(restart_policy caddy)
+  [ "$cpol" = no ] || { echo "inconsistente:Caddy da Blue com restart=$cpol (esperado no)"; return; }
+  apol=$(restart_policy authelia)
+  if container_running authelia; then
+    [ "$apol" != no ] || { echo "inconsistente:Authelia da Blue em execução com restart=no (religado fora do procedimento)"; return; }
+    [ "$(health_status authelia)" = healthy ] || { echo "inconsistente:Authelia da Blue em execução sem healthy ($(health_status authelia))"; return; }
+    echo standby
+  else
+    [ "$apol" = no ] || { echo "inconsistente:Authelia da Blue parado com restart=$apol (parada fora da R2)"; return; }
+    echo r2
+  fi
+}
+
+# Sessão tmux/screen real na ancestralidade do processo. Não usa TMUX/STY: o sudo os remove e qualquer um pode
+# defini-los. Sobe a árvore por /proc/<pid>/stat (PPID) e identifica cada processo pelo executável (/proc/<pid>/exe;
+# /proc/<pid>/comm quando o exe não é legível, ex.: sudo sem CAP_SYS_PTRACE). Imprime "tmux (pid N)" e retorna 0.
+multiplexer_ancestor() { # [pid]
+  local pid=${1:-$$} name stat ppid hops=0
+  while [ "$pid" -gt 1 ] && [ "$hops" -lt 64 ]; do
+    name=$(readlink "/proc/$pid/exe" 2>/dev/null) || name=$(cat "/proc/$pid/comm" 2>/dev/null) || return 1
+    name=${name##*/}
+    case "$name" in tmux*|screen*|SCREEN*) echo "${name%% *} (pid $pid)"; return 0 ;; esac
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    read -r _ ppid _ <<< "${stat##*) }"   # campos após "(comm) ": estado, PPID, ...
+    pid=$ppid; hops=$((hops + 1))
+  done
+  return 1
+}
 
 # Estado da Blue: containers em execução e arquivos sem alteração em relação à baseline.
 blue_status() {
   local rc=0
   container_running caddy    && log "Blue: container caddy em execução"    || { warn "Blue: container caddy NÃO está em execução"; rc=1; }
   container_running authelia && log "Blue: container authelia em execução" || { warn "Blue: container authelia NÃO está em execução"; rc=1; }
-  [ "$(sha256sum "$BLUE_CADDY_DIR/Caddyfile" | cut -d' ' -f1)" = "$BLUE_CADDYFILE_SHA256" ] \
-    && log "Blue: Caddyfile igual à baseline" || { warn "Blue: Caddyfile difere da baseline (deriva de configuração)"; rc=1; }
+  case "$(sha256sum "$BLUE_CADDY_DIR/Caddyfile" | cut -d' ' -f1)" in
+    "$BLUE_CADDYFILE_SHA256") log "Blue: Caddyfile igual à baseline" ;;
+    "$BLUE_ROLLBACK_CADDYFILE_SHA256") log "Blue: Caddyfile de rollback (baseline com o kuma.home fechado, R2.1)" ;;
+    *) warn "Blue: Caddyfile difere da baseline (deriva de configuração)"; rc=1 ;;
+  esac
   [ "$(sha256sum "$BLUE_AUTHELIA_CONFIG" | cut -d' ' -f1)" = "$BLUE_AUTHELIA_CONFIG_SHA256" ] \
     && log "Blue: configuration.yml igual à baseline" || { warn "Blue: configuration.yml difere da baseline (deriva de configuração)"; rc=1; }
   return "$rc"

@@ -1,0 +1,10 @@
+[Unit]
+Description=Observa a publicação do smoke test e aciona a cópia para o AccessGateway (T06.4)
+
+[Path]
+# home-smoke-publish grava status.json e depois index.html (os dois com rename atômico): observar o último.
+PathChanged=/srv/accessgateway/shared/smoke-status/index.html
+Unit=accessgateway-status-sync.service
+
+[Install]
+WantedBy=paths.target

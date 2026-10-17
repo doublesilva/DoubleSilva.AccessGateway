@@ -1,0 +1,40 @@
+# Override SOMENTE para o ensaio de restauração isolada (T07.7, infra/restore-drill/restore-drill.sh).
+# Aplicado sobre o compose.yml RESTAURADO do backup, com projeto "agrestore":
+#   - nomes de container próprios (nunca accessgateway-caddy/-authelia);
+#   - sem rede do host: o Caddy fica numa bridge e publica só no loopback (127.0.0.1:28080/28443); os upstreams
+#     127.0.0.1:52xx/53xx/51xx apontam para o próprio container (502) — nenhuma aplicação real é alcançada;
+#   - o Authelia fica só numa rede INTERNA (sem saída, sem porta publicada); o Caddy o alcança pelo nome do serviço;
+#   - sem pull (imagens locais fixadas por digest).
+name: agrestore
+
+services:
+  caddy:
+    container_name: agrestore-caddy
+    network_mode: !reset null
+    pull_policy: never
+    networks:
+      - edge
+      - internal
+    ports:
+      - "127.0.0.1:28080:18080"
+      - "127.0.0.1:28443:18443"
+    environment:
+      GATEWAY_HTTP_PORT: "18080"
+      GATEWAY_HTTPS_PORT: "18443"
+      GATEWAY_ADMIN_PORT: "2020"
+      GATEWAY_DEFAULT_BIND: ""
+      GATEWAY_AUTHELIA_UPSTREAM: authelia:9091
+
+  authelia:
+    container_name: agrestore-authelia
+    pull_policy: never
+    ports: !reset []
+    networks:
+      - internal
+
+networks:
+  edge:
+    name: agrestore_edge
+  internal:
+    name: agrestore_internal
+    internal: true

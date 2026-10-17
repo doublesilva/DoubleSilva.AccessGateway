@@ -1,0 +1,450 @@
+#!/usr/bin/env bash
+# Smoke test do home-server (publicado por home-smoke-publish a cada 5 min).
+# T06.1: o gateway (Caddy + Authelia) não é mais fixo no container "caddy". O gateway ativo é quem realmente
+# atende a porta 443: o PID do listener (ss -p) é comparado ao PID principal de cada container de Caddy.
+#   Blue  = caddy + authelia                              (antes do cutover / após rollback)
+#   Green = accessgateway-caddy + accessgateway-authelia  (DoubleSilva.AccessGateway)
+# Nenhum gateway ou os dois ao mesmo tempo = FAIL (estado inconsistente).
+# T06.2: API, OutHome e Panel verificados nos endpoints reais (seções 7 e 8), sem sessão e sem iniciar login OIDC.
+# Versionado em
+# DoubleSilva.AccessGateway/infra/home-smoke-test; original preservado em baseline/.
+
+set -u
+
+TAILSCALE_IP="100.115.190.21"
+LAN_IP="192.168.0.162"
+CA_ROOT="${SMOKE_CA_ROOT:-/etc/homeautomation/certs/caddy-local-root.crt}"
+
+BLUE_CADDY="caddy"
+BLUE_AUTHELIA="authelia"
+GREEN_CADDY="accessgateway-caddy"
+GREEN_AUTHELIA="accessgateway-authelia"
+
+PASSED=0
+FAILED=0
+
+green='\033[0;32m'
+red='\033[0;31m'
+yellow='\033[0;33m'
+reset='\033[0m'
+
+pass() {
+    printf "${green}[PASS]${reset} %s\n" "$1"
+    PASSED=$((PASSED + 1))
+}
+
+fail() {
+    printf "${red}[FAIL]${reset} %s\n" "$1"
+    FAILED=$((FAILED + 1))
+}
+
+info() {
+    printf "${yellow}[INFO]${reset} %s\n" "$1"
+}
+
+check_http() {
+    local description="$1"
+    local url="$2"
+    shift 2
+
+    local code
+
+    code=$(
+        curl \
+            -k \
+            -sS \
+            -o /dev/null \
+            -w '%{http_code}' \
+            --connect-timeout 5 \
+            --max-time 10 \
+            "$@" \
+            "$url" \
+            2>/dev/null
+    ) || code="000"
+
+    if [[ "$code" == "200" ]]; then
+        pass "$description (HTTP $code)"
+    else
+        fail "$description (HTTP $code)"
+    fi
+}
+
+# HTTPS com a cadeia validada pela raiz da CA interna (sem -k): falha de certificado = FAIL.
+check_https_verified() {
+    local description="$1" host="$2" path="$3" ip="$4" expected="$5"
+    local code
+
+    code=$(
+        curl \
+            -sS \
+            -o /dev/null \
+            -w '%{http_code}' \
+            --cacert "$CA_ROOT" \
+            --connect-timeout 5 \
+            --max-time 10 \
+            --resolve "${host}:443:${ip}" \
+            "https://${host}${path}" \
+            2>/dev/null
+    ) || code="000"
+
+    if [[ "$code" == "$expected" ]]; then
+        pass "$description (HTTP $code)"
+    else
+        fail "$description (HTTP $code; 000 = TLS/conexão)"
+    fi
+}
+
+container_running() {
+    [[ "$(docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null)" == "true" ]]
+}
+
+# PID principal do container (vazio se parado ou inexistente)
+container_pid() {
+    docker inspect --format '{{if .State.Running}}{{.State.Pid}}{{end}}' "$1" 2>/dev/null
+}
+
+# Gateways cujo processo escuta na porta: "blue", "green", "blue green" ou vazio
+port_owner() {
+    local pids owner=""
+    pids="$(ss -ltnpH "sport = :$1" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u)"
+    [[ -n "$BLUE_PID" ]] && grep -qx "$BLUE_PID" <<<"$pids" && owner="blue"
+    [[ -n "$GREEN_PID" ]] && grep -qx "$GREEN_PID" <<<"$pids" && owner="${owner:+$owner }green"
+    echo "$owner"
+}
+
+echo
+echo "========================================="
+echo " Home Server - Smoke Test"
+echo "========================================="
+echo
+
+#
+# 1. Tailscale
+#
+
+if systemctl is-active --quiet tailscaled; then
+    pass "tailscaled ativo"
+else
+    fail "tailscaled não está ativo"
+fi
+
+CURRENT_TS_IP="$(tailscale ip -4 2>/dev/null | head -1)"
+
+if [[ "$CURRENT_TS_IP" == "$TAILSCALE_IP" ]]; then
+    pass "IP Tailscale correto: $TAILSCALE_IP"
+else
+    fail "IP Tailscale esperado $TAILSCALE_IP, atual: ${CURRENT_TS_IP:-indisponível}"
+fi
+
+if ip link show tailscale0 >/dev/null 2>&1; then
+    pass "Interface tailscale0 presente"
+else
+    fail "Interface tailscale0 ausente"
+fi
+
+#
+# 2. Firewall persistente
+#
+
+if systemctl is-active --quiet home-server-docker-firewall.service; then
+    pass "Firewall persistente ativo"
+else
+    fail "home-server-docker-firewall.service inativo"
+fi
+
+if iptables -t nat -S HS-TAILSCALE-DNS >/dev/null 2>&1; then
+    pass "Chain HS-TAILSCALE-DNS presente"
+else
+    fail "Chain HS-TAILSCALE-DNS ausente"
+fi
+
+if iptables -t nat -S HS-TAILSCALE-DNS 2>/dev/null \
+    | grep -q -- "--to-destination ${LAN_IP}:53"; then
+
+    pass "Encaminhamento DNS Tailscale -> AdGuard presente"
+else
+    fail "Encaminhamento DNS Tailscale -> AdGuard ausente"
+fi
+
+#
+# 3. DNS
+#
+
+check_dns() { # descrição servidor nome
+    local answer
+    answer="$(dig @"$2" "$3" +short +time=2 +tries=1 2>/dev/null | tail -1)"
+    if [[ "$answer" == "$LAN_IP" ]]; then
+        pass "$1: $3 -> $LAN_IP"
+    else
+        fail "$1 de $3 retornou: ${answer:-sem resposta}"
+    fi
+}
+
+check_dns "DNS LAN" "$LAN_IP" casa.home
+check_dns "DNS Tailscale" "$TAILSCALE_IP" casa.home
+check_dns "DNS LAN" "$LAN_IP" auth.home.doublesilva.com
+check_dns "DNS Tailscale" "$TAILSCALE_IP" auth.home.doublesilva.com
+
+#
+# 4. Gateway ativo (quem atende 80/443)
+#
+
+BLUE_PID="$(container_pid "$BLUE_CADDY")"
+GREEN_PID="$(container_pid "$GREEN_CADDY")"
+OWNER_443="$(port_owner 443)"
+OWNER_80="$(port_owner 80)"
+
+GW=""
+GW_CADDY=""
+GW_AUTHELIA=""
+
+case "$OWNER_443" in
+    blue)
+        GW="Blue"; GW_CADDY="$BLUE_CADDY"; GW_AUTHELIA="$BLUE_AUTHELIA"
+        pass "Gateway ativo em 443: Blue ($BLUE_CADDY)"
+        ;;
+    green)
+        GW="Green"; GW_CADDY="$GREEN_CADDY"; GW_AUTHELIA="$GREEN_AUTHELIA"
+        pass "Gateway ativo em 443: Green ($GREEN_CADDY)"
+        ;;
+    "")
+        holder="$(ss -ltnpH 'sport = :443' 2>/dev/null | grep -o 'users:(("[^"]*"' | cut -d'"' -f2 | sort -u | paste -sd, -)"
+        fail "Nenhum gateway ($BLUE_CADDY/$GREEN_CADDY) atende 443 (porta: ${holder:-livre})"
+        ;;
+    *)
+        fail "Estado inconsistente: Blue e Green atendem 443"
+        ;;
+esac
+
+if [[ -n "$GW" && "$OWNER_80" == "$OWNER_443" ]]; then
+    pass "Porta 80 atendida pelo mesmo gateway ($GW)"
+else
+    fail "Porta 80 não atendida pelo gateway ativo (443: ${OWNER_443:-nenhum}; 80: ${OWNER_80:-nenhum})"
+fi
+
+# Com a Green ativa, o Caddy da Blue não pode estar em execução (sem as portas, ficaria em loop de bind).
+# Com a Blue ativa, a Green pode estar em execução em modo preparação (loopback 18080/18443).
+if [[ "$GW" == "Green" ]] && container_running "$BLUE_CADDY"; then
+    fail "Estado inconsistente: $BLUE_CADDY (Blue) em execução com a Green ativa"
+elif [[ -n "$GW" ]]; then
+    pass "Sem Caddy concorrente fora do gateway ativo ($GW)"
+    [[ "$GW" == "Blue" ]] && container_running "$GREEN_CADDY" && info "$GREEN_CADDY em execução fora de 80/443 (preparação)"
+else
+    fail "Concorrência não avaliada: nenhum gateway ativo"
+fi
+
+#
+# 5. Caddy / Dashboard
+#
+
+check_http \
+    "casa.home pela LAN" \
+    "https://casa.home/" \
+    --resolve "casa.home:443:${LAN_IP}"
+
+check_http \
+    "casa.home pela interface Tailscale" \
+    "https://casa.home/" \
+    --resolve "casa.home:443:${TAILSCALE_IP}"
+
+REDIRECT_CODE="$(
+    curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \
+        --resolve "casa.home:80:${LAN_IP}" "http://casa.home/" 2>/dev/null
+)" || REDIRECT_CODE="000"
+
+if [[ "$REDIRECT_CODE" == "308" || "$REDIRECT_CODE" == "301" ]]; then
+    pass "casa.home HTTP -> HTTPS pela LAN (HTTP $REDIRECT_CODE)"
+else
+    fail "casa.home HTTP -> HTTPS pela LAN (HTTP $REDIRECT_CODE)"
+fi
+
+#
+# 6. TLS e Authelia pelo gateway (certificado validado pela CA interna)
+#
+
+check_https_verified "Authelia via gateway com TLS verificado (LAN)" \
+    auth.home.doublesilva.com /api/health "$LAN_IP" 200
+check_https_verified "Authelia via gateway com TLS verificado (Tailscale)" \
+    auth.home.doublesilva.com /api/health "$TAILSCALE_IP" 200
+
+#
+# 7. API e OutHome (T06.2)
+#
+# Desde 27/09 casa.home é o OutHome (React/Vite + BFF ASP.NET). A API não é mais publicada pelo gateway: só escuta
+# em 127.0.0.1:5100 e o BFF responde 404 a /api/* por desenho. As checagens antigas "API health pela LAN/Tailscale"
+# (https://casa.home/api/health) foram substituídas por:
+#   - a saúde da própria API no endpoint real (/health, JSON status=healthy);
+#   - o BFF do OutHome pela LAN e pelo Tailscale: /bff/session sem sessão = 401. Prova que o ASP.NET responde
+#     (o fallback do SPA daria 200 e uma queda, 502) sem iniciar login OIDC (/bff usa o cookie, não o desafio OIDC);
+#   - a API continua não exposta por casa.home (/api/health = 404 do BFF; 502/000 = OutHome fora).
+# Nenhuma delas usa sessão ou credencial.
+
+API_HEALTH="$(curl -sS --connect-timeout 5 --max-time 10 http://127.0.0.1:5100/health 2>/dev/null)" || API_HEALTH=""
+
+if grep -q '"status":"healthy"' <<<"$API_HEALTH"; then
+    pass "API HomeAutomation saudável (http://127.0.0.1:5100/health)"
+else
+    fail "API HomeAutomation sem saúde em http://127.0.0.1:5100/health (resposta: ${API_HEALTH:-nenhuma})"
+fi
+
+check_https_verified "OutHome BFF pela LAN (/bff/session sem sessão)" \
+    casa.home /bff/session "$LAN_IP" 401
+check_https_verified "OutHome BFF pelo Tailscale (/bff/session sem sessão)" \
+    casa.home /bff/session "$TAILSCALE_IP" 401
+check_https_verified "API não exposta por casa.home (/api/health bloqueado pelo BFF)" \
+    casa.home /api/health "$LAN_IP" 404
+
+#
+# 8. Panel (T06.2)
+#
+# Desde 25/09 panel.home redireciona (301) para panel.home.doublesilva.com, protegido pelo Authelia (forward_auth);
+# o antigo POST em https://panel.home/_blazor/negotiate só podia dar 301. O negotiate do Blazor exige sessão e, sem
+# ela, o Panel inicia um login OIDC (PAR no Authelia): não é usado. Substituído por:
+#   - o alias legado panel.home redireciona para o domínio atual;
+#   - panel.home.doublesilva.com sem sessão é desviado para o portal do Authelia (302), sem chegar ao Panel;
+#   - /stream/* (sem forward_auth, autenticado pelo próprio Panel por cookie) = 401: o Panel responde via gateway.
+
+check_redirect() { # descrição host caminho ip código prefixo_location
+    local out code location
+    out="$(
+        curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+            --cacert "$CA_ROOT" --connect-timeout 5 --max-time 10 \
+            --resolve "${2}:443:${4}" "https://${2}${3}" 2>/dev/null
+    )" || out="000"
+    code="${out%% *}"
+    location="${out#* }"
+    [[ "$location" == "$out" ]] && location=""
+
+    if [[ "$code" == "$5" && "$location" == "$6"* ]]; then
+        pass "$1 (HTTP $code)"
+    else
+        fail "$1 (HTTP $code${location:+ -> $location}; esperado $5 -> $6…)"
+    fi
+}
+
+check_redirect "panel.home redireciona para panel.home.doublesilva.com (Tailscale)" \
+    panel.home /react "$TAILSCALE_IP" 301 "https://panel.home.doublesilva.com/react"
+check_redirect "Panel exige login no Authelia (Tailscale)" \
+    panel.home.doublesilva.com / "$TAILSCALE_IP" 302 "https://auth.home.doublesilva.com/"
+check_https_verified "Panel responde via gateway (Tailscale, /stream sem sessão)" \
+    panel.home.doublesilva.com /stream/smoke-test "$TAILSCALE_IP" 401
+
+#
+# 9. Containers essenciais
+#
+
+if [[ -n "$GW" ]]; then
+    if container_running "$GW_CADDY"; then
+        pass "Container $GW_CADDY (gateway $GW) está em execução"
+    else
+        fail "Container $GW_CADDY (gateway $GW) não está em execução"
+    fi
+
+    AUTHELIA_HEALTH="$(docker inspect --format '{{if .State.Running}}{{if .State.Health}}{{.State.Health.Status}}{{else}}sem healthcheck{{end}}{{else}}parado{{end}}' "$GW_AUTHELIA" 2>/dev/null)"
+    if [[ "$AUTHELIA_HEALTH" == "healthy" ]]; then
+        pass "Container $GW_AUTHELIA (gateway $GW) em execução e saudável"
+    else
+        fail "Container $GW_AUTHELIA (gateway $GW): ${AUTHELIA_HEALTH:-inexistente}"
+    fi
+else
+    fail "Container do gateway: nenhum gateway ativo identificado"
+    fail "Authelia do gateway: nenhum gateway ativo identificado"
+fi
+
+for container in \
+    adguard \
+    homeautomation-api-1 \
+    homeautomation-panel-1
+do
+    if container_running "$container"; then
+        pass "Container $container está em execução"
+    else
+        fail "Container $container não está em execução"
+    fi
+done
+
+#
+# 10. Validação do Caddyfile do gateway ativo
+#
+
+if [[ -z "$GW" ]]; then
+    fail "Caddyfile não validado: nenhum gateway ativo"
+elif docker exec "$GW_CADDY" \
+    caddy validate \
+    --config /etc/caddy/Caddyfile \
+    --adapter caddyfile \
+    >/dev/null 2>&1; then
+
+    pass "Caddyfile válido ($GW_CADDY)"
+else
+    fail "Caddyfile inválido ($GW_CADDY)"
+fi
+
+#
+# 11. Integridade da CA interna (T07.5.3)
+#
+# Usa o verificador SOMENTE LEITURA do AccessGateway (scripts/ca-copies-check.sh + ca/copies.conf): cada cópia em uso
+# é um único certificado, sem chave, CA com o fingerprint esperado e byte a byte igual à raiz oficial (PKI da Green;
+# só root.crt é lido, nunca a chave); o Jarvis precisa do link de hash; cert.home precisa servir a raiz oficial.
+# Independe do gateway ativo (após um rollback para a Blue, cert.home volta a 404 e a checagem acusa).
+
+CA_CHECK="${SMOKE_CA_CHECK:-/srv/accessgateway/app/scripts/ca-copies-check.sh}"
+
+if [[ -f "$CA_CHECK" ]]; then
+    CA_RC=0
+    CA_OUT="$(bash "$CA_CHECK" 2>&1)" || CA_RC=$?
+
+    ca_check() { # descrição padrão... (todas as linhas [PASS] exigidas)
+        local description="$1" pattern detail key
+        shift
+        for pattern in "$@"; do
+            if ! grep -qF -- "[PASS] $pattern" <<<"$CA_OUT"; then
+                # motivo: a linha [FAIL]/[INFO] do mesmo caminho (2º campo do padrão, sem ":" ou "(" finais)
+                key="$(awk '{print $2}' <<<"$pattern" | sed -E 's/[:(]+$//')"
+                detail="$(grep -F -- "$key" <<<"$CA_OUT" | grep -E '^\[(FAIL|INFO)\]' | head -1 | sed -E 's/^\[[A-Z]+\] //' | cut -c1-140)"
+                fail "$description: ${detail:-não verificado}"
+                return
+            fi
+        done
+        pass "$description"
+    }
+
+    ca_check "CA oficial (PKI da Green) com o fingerprint esperado" \
+        "oficial /srv/accessgateway/data/caddy/caddy/pki/authorities/local/root.crt"
+    ca_check "CA canônica (/etc/accessgateway/ca) = oficial (Kuma)" \
+        "copia /etc/accessgateway/ca/caddy-root.crt"
+    ca_check "CA do HomeAutomation (/etc/homeautomation/certs) = oficial" \
+        "copia /etc/homeautomation/certs/caddy-local-root.crt"
+    ca_check "CA do Jarvis (/etc/jarvis/certs) = oficial, com link de hash" \
+        "copia+hash /etc/jarvis/certs/caddy-local-root.crt (" \
+        "copia+hash /etc/jarvis/certs/caddy-local-root.crt: link de hash"
+    ca_check "CA publicada em cert.home = oficial" \
+        "publicada /srv/accessgateway/shared/public-certs/caddy-root.crt" \
+        "http://cert.home/caddy-root.crt: 200"
+
+    if [[ "$CA_RC" -eq 0 ]]; then
+        pass "Inventário da CA sem divergências (ca-copies-check)"
+    else
+        fail "Inventário da CA com divergências: $(grep -c '^\[FAIL\]' <<<"$CA_OUT") falha(s) em ca-copies-check"
+    fi
+else
+    fail "Verificador da CA ausente: $CA_CHECK"
+fi
+
+#
+# Resultado
+#
+
+echo
+echo "========================================="
+printf " PASS: %d\n" "$PASSED"
+printf " FAIL: %d\n" "$FAILED"
+echo "========================================="
+
+if [[ "$FAILED" -eq 0 ]]; then
+    printf "${green}SMOKE TEST: OK${reset}\n"
+    exit 0
+else
+    printf "${red}SMOKE TEST: FALHOU${reset}\n"
+    exit 1
+fi

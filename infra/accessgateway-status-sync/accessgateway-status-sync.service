@@ -1,0 +1,17 @@
+[Unit]
+Description=Copia o dashboard do smoke test para o AccessGateway (T06.4)
+Documentation=file:///srv/accessgateway/app/docs/T06.4-relatorio.md
+ConditionPathExists=/srv/accessgateway/shared/smoke-status/index.html
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/accessgateway-status-sync
+# Só lê a origem e escreve no destino
+ProtectSystem=strict
+ReadWritePaths=/srv/accessgateway/static/netdata-dashboard
+PrivateTmp=true
+PrivateNetwork=true
+NoNewPrivileges=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true

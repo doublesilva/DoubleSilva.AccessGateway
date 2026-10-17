@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Stub do curl para tests/smoke. Responde como o home-server atual (códigos reais medidos em 11/10/2026).
+# - Rotas do gateway (80/443) só respondem se houver listener de gateway ($SMOKE_STATE/gateway_up + port<N>).
+# - A API (http://127.0.0.1:5100) é independente do gateway ($SMOKE_STATE/api_down a derruba).
+# - $SMOKE_STATE/override/<url com / e : trocados por _> sobrepõe a resposta:
+#     "CÓDIGO [LOCATION]" | "timeout" (exit 28) | "refused" (exit 7) | "body:<texto>" (200 com esse corpo)
+S=${SMOKE_STATE:?}
+url=""; cacert=0; wfmt=""; out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    http://*|https://*) url=$1 ;;
+    --cacert) cacert=1; shift ;;
+    -w) wfmt=$2; shift ;;
+    -o) out=$2; shift ;;
+    --resolve|--connect-timeout|--max-time|-X) shift ;;
+  esac
+  shift
+done
+
+reply() { # código [location] [corpo]
+  [ -z "${3:-}" ] || [ "$out" = /dev/null ] || printf '%s' "$3"
+  case "$wfmt" in
+    *redirect_url*) printf '%s %s' "$1" "${2:-}" ;;
+    ?*) printf '%s' "$1" ;;
+  esac
+  exit 0
+}
+fail_conn() { [ -z "$wfmt" ] || printf 000; exit "$1"; }
+
+key=$(printf '%s' "$url" | tr '/:' '__')
+if [ -f "$S/override/$key" ]; then
+  o=$(cat "$S/override/$key")
+  case "$o" in
+    timeout) fail_conn 28 ;;
+    refused) fail_conn 7 ;;
+    body:*) reply 200 "" "${o#body:}" ;;
+    *) read -r c l <<<"$o"; reply "$c" "${l:-}" ;;
+  esac
+fi
+
+case "$url" in
+  http://127.0.0.1:5100/health)
+    [ ! -e "$S/api_down" ] || fail_conn 7
+    reply 200 "" '{"status":"healthy","timestamp":"2026-10-11T16:57:02+00:00"}' ;;
+esac
+
+case "$url" in https://*) port=443 ;; *) port=80 ;; esac
+if [ ! -e "$S/gateway_up" ] || ! grep -q . "$S/port$port" 2>/dev/null; then fail_conn 7; fi
+if [ "$cacert" = 1 ] && [ -e "$S/bad_tls" ]; then fail_conn 60; fi
+
+case "$url" in
+  http://cert.home/caddy-root.crt)
+    if [ -e "$S/cert_home_404" ] || [ ! -f "${SMOKE_CERT_HOME_FILE:-/tmp/cert-home.crt}" ]; then reply 404; fi
+    [ "$out" = /dev/null ] || cp "${SMOKE_CERT_HOME_FILE:-/tmp/cert-home.crt}" "$out"
+    reply 200 ;;
+  http://*) reply 308 "https://${url#http://}" ;;
+  https://casa.home/api/health) reply 404 ;;
+  https://casa.home/bff/session) reply 401 ;;
+  https://panel.home/_blazor/negotiate*) reply 301 "https://panel.home.doublesilva.com/_blazor/negotiate?negotiateVersion=1" ;;
+  https://panel.home/*) reply 301 "https://panel.home.doublesilva.com/${url#https://panel.home/}" ;;
+  https://panel.home.doublesilva.com/stream/*) reply 401 ;;
+  https://panel.home.doublesilva.com/*) reply 302 "https://auth.home.doublesilva.com/?rd=https%3A%2F%2Fpanel.home.doublesilva.com%2F&rm=GET" ;;
+  *) reply 200 ;;
+esac

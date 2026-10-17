@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+
+import html
+import json
+import os
+import re
+import ssl
+import subprocess
+
+from datetime import datetime
+from pathlib import Path
+
+from urllib.parse import (
+    parse_qsl,
+    urlencode,
+    urlsplit,
+    urlunsplit,
+)
+
+from urllib.request import urlopen
+
+
+SMOKE = "/usr/local/sbin/home-smoke-test"
+
+OUT_DIR = Path("/opt/caddy/config/smoke-status")
+JSON_FILE = OUT_DIR / "status.json"
+HTML_FILE = OUT_DIR / "index.html"
+
+KUMA_URL_FILE = Path(
+    "/etc/home-smoke-test/kuma-push-url"
+)
+
+
+# Remove códigos ANSI gerados pelo smoke-test
+ansi = re.compile(
+    r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"
+)
+
+
+#
+# Executa o smoke-test
+#
+
+result = subprocess.run(
+    [SMOKE],
+    text=True,
+    capture_output=True
+)
+
+raw = result.stdout + result.stderr
+clean = ansi.sub("", raw)
+
+
+#
+# Extrai resultados PASS / FAIL
+#
+
+checks = []
+
+for line in clean.splitlines():
+    match = re.match(
+        r"^\[(PASS|FAIL)\]\s+(.*)$",
+        line.strip()
+    )
+
+    if match:
+        checks.append({
+            "status": match.group(1),
+            "description": match.group(2)
+        })
+
+
+passed = sum(
+    1
+    for check in checks
+    if check["status"] == "PASS"
+)
+
+failed = sum(
+    1
+    for check in checks
+    if check["status"] == "FAIL"
+)
+
+
+#
+# Estado geral
+#
+
+ok = (
+    result.returncode == 0
+    and failed == 0
+)
+
+generated_at = (
+    datetime
+    .now()
+    .astimezone()
+    .isoformat()
+)
+
+
+#
+# Objeto JSON
+#
+
+data = {
+    "ok": ok,
+    "generatedAt": generated_at,
+    "passed": passed,
+    "failed": failed,
+    "checks": checks
+}
+
+
+#
+# Garante diretório de saída
+#
+
+OUT_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+
+#
+# Escrita atômica para evitar arquivo parcial
+#
+
+def atomic_write(path, content):
+    tmp = Path(
+        str(path) + ".tmp"
+    )
+
+    tmp.write_text(
+        content,
+        encoding="utf-8"
+    )
+
+    os.replace(
+        tmp,
+        path
+    )
+
+
+#
+# Publica JSON
+#
+
+atomic_write(
+    JSON_FILE,
+    json.dumps(
+        data,
+        indent=2,
+        ensure_ascii=False
+    )
+)
+
+
+#
+# Monta tabela HTML
+#
+
+rows = ""
+
+for check in checks:
+    status = check["status"]
+
+    description = html.escape(
+        check["description"]
+    )
+
+    css_class = (
+        "pass"
+        if status == "PASS"
+        else "fail"
+    )
+
+    rows += f"""
+        <tr>
+            <td class="{css_class}">
+                {status}
+            </td>
+            <td>
+                {description}
+            </td>
+        </tr>
+    """
+
+
+#
+# Estado geral da página
+#
+
+overall_class = (
+    "pass"
+    if ok
+    else "fail"
+)
+
+overall_text = (
+    "OK"
+    if ok
+    else "FALHOU"
+)
+
+
+#
+# HTML
+#
+
+page = f"""<!doctype html>
+
+<html lang="pt-BR">
+
+<head>
+
+<meta charset="utf-8">
+
+<meta
+    name="viewport"
+    content="width=device-width,initial-scale=1">
+
+<meta
+    http-equiv="refresh"
+    content="60">
+
+<title>
+    Home Server - Smoke Test
+</title>
+
+<style>
+
+body {{
+    font-family:
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    max-width: 900px;
+    margin: 30px auto;
+    padding: 0 20px;
+
+    background: #111;
+    color: #eee;
+}}
+
+h1 {{
+    margin-bottom: 20px;
+}}
+
+.card {{
+    background: #1c1c1c;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+}}
+
+.pass {{
+    color: #59d987;
+    font-weight: 700;
+}}
+
+.fail {{
+    color: #ff6868;
+    font-weight: 700;
+}}
+
+table {{
+    border-collapse: collapse;
+    width: 100%;
+}}
+
+td {{
+    padding: 8px;
+    border-bottom: 1px solid #333;
+}}
+
+td:first-child {{
+    width: 80px;
+}}
+
+small {{
+    color: #999;
+}}
+
+.summary {{
+    font-size: 18px;
+}}
+
+</style>
+
+</head>
+
+<body>
+
+<h1>
+    Home Server
+</h1>
+
+<div class="card">
+
+    <h2 class="{overall_class}">
+        Smoke Test: {overall_text}
+    </h2>
+
+    <p class="summary">
+        PASS: {passed}
+        &nbsp;&nbsp;
+        FAIL: {failed}
+    </p>
+
+    <small>
+        Última execução:
+        {html.escape(generated_at)}
+    </small>
+
+</div>
+
+<div class="card">
+
+<table>
+
+{rows}
+
+</table>
+
+</div>
+
+</body>
+
+</html>
+"""
+
+
+#
+# Publica HTML
+#
+
+atomic_write(
+    HTML_FILE,
+    page
+)
+
+
+#
+# Envia heartbeat para Uptime Kuma
+#
+
+if KUMA_URL_FILE.exists():
+
+    try:
+
+        push_url = (
+            KUMA_URL_FILE
+            .read_text(
+                encoding="utf-8"
+            )
+            .strip()
+        )
+
+        if push_url:
+
+            message = (
+                f"{passed} PASS / "
+                f"{failed} FAIL"
+            )
+
+
+            #
+            # Divide a URL original do Kuma
+            #
+
+            parts = urlsplit(
+                push_url
+            )
+
+
+            #
+            # Carrega parâmetros já existentes.
+            #
+            # A URL criada pelo Kuma normalmente
+            # já contém status, msg e ping.
+            #
+
+            query = dict(
+                parse_qsl(
+                    parts.query,
+                    keep_blank_values=True
+                )
+            )
+
+
+            #
+            # SUBSTITUI status e msg existentes,
+            # evitando duplicação.
+            #
+
+            query["status"] = (
+                "up"
+                if ok
+                else "down"
+            )
+
+            query["msg"] = message
+
+
+            #
+            # Reconstrói a URL
+            #
+
+            request_url = urlunsplit((
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(query),
+                parts.fragment
+            ))
+
+
+            #
+            # Caddy usa certificado interno.
+            #
+            # Não exibimos a URL nem qualquer
+            # identificador do monitor.
+            #
+
+            context = None
+
+            if request_url.startswith(
+                "https://"
+            ):
+                context = (
+                    ssl
+                    ._create_unverified_context()
+                )
+
+
+            #
+            # Envia heartbeat
+            #
+
+            with urlopen(
+                request_url,
+                timeout=5,
+                context=context
+            ) as response:
+
+                response.read()
+
+
+    except Exception as exc:
+
+        #
+        # Não mostrar URL nem credenciais.
+        #
+
+        print(
+            "Aviso: não foi possível "
+            "atualizar o Kuma: "
+            f"{type(exc).__name__}"
+        )
+
+
+#
+# Resultado local
+#
+
+print(
+    "Smoke publicado: "
+    f"{passed} PASS / "
+    f"{failed} FAIL"
+)

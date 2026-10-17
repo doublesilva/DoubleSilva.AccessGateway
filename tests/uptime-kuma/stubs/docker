@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Stub do docker para tests/uptime-kuma. Estado em $KS: mount (origem do bind do certificado), started, counts,
+# fail_new (com o canônico: TLS falha), down_new (com o canônico: Kuma não responde), lose_data (zera monitores).
+S=${KS:?}
+echo "docker $*" >> "$S/calls.log"
+src_of_compose() { sed -nE 's#^ +- ([^:]+):/etc/ssl/certs/caddy-root.crt:ro$#\1#p' "$1"; }
+is_new() { [ "$(cat "$S/mount")" = "$KUMA_CANON_CA" ]; }
+case "$1" in
+  inspect)
+    fmt=$3; name=${*: -1}
+    case "$fmt" in
+      *State.Running*) echo true ;;
+      *'{{.Image}}'*) echo "sha256:917318f9d7be5257f43ba412c766a473be336eb451d70744f3b482d0c3997c0e" ;;
+      *RestartPolicy*) echo 'unless-stopped {"3001/tcp":[{"HostIp":"127.0.0.1","HostPort":"3001"}]} ["192.168.0.162"]' ;;
+      *'eq .Destination'*) echo "$(cat "$S/mount") rw=false" ;;
+      *'{{.Source}}{{println}}'*) printf '%s/data\n%s\n' "$KUMA_DIR" "$(cat "$S/mount")" ;;
+      *Config.Env*) printf 'NODE_EXTRA_CA_CERTS=/etc/ssl/certs/caddy-root.crt\nUPTIME_KUMA_IS_CONTAINER=1\n' ;;
+      *Health.Status*) echo "healthy desde $(cat "$S/started"), imagem sha256:917318f9d7be" ;;
+      *StartedAt*) echo "$name 2026-10-08T09:46:02Z 0" | cut -d' ' -f2- ;;
+      *) echo '[{"Name":"uptime-kuma"}]' ;;
+    esac ;;
+  ps) printf 'accessgateway-caddy\nhomeautomation-api-1\nuptime-kuma\n' ;;
+  exec)
+    shift; [ "$1" = -i ] && shift; shift
+    case "$*" in
+      sqlite3*'monitores='*)
+        if [ -e "$S/lose_data" ] && is_new; then printf 'monitores=0\nativos=0\nnotificacoes=1\nheartbeat_max=10\n'
+        else printf 'monitores=8\nativos=8\nnotificacoes=1\nheartbeat_max=%s\n' "$(cat "$S/hb")"; echo $(( $(cat "$S/hb") + 3 )) > "$S/hb"; fi ;;
+      sqlite3*"type='push'"*) printf 'Smoke=2026-10-12 15:00:00\nBackup=2026-10-12 15:30:00\n' ;;
+      "sha256sum /etc/ssl/certs/caddy-root.crt") sha256sum "$(cat "$S/mount")" ;;
+      node*) if is_new && [ -e "$S/fail_new" ]; then echo "UNABLE_TO_GET_ISSUER_CERT_LOCALLY" >&2; exit 2; fi ;;
+      extra/healthcheck) if is_new && [ -e "$S/down_new" ]; then exit 1; fi ;;
+      *) echo "stub exec: não suportado: $*" >&2; exit 2 ;;
+    esac ;;
+  compose)
+    f=""; prev=""; for a in "$@"; do [ "$prev" = -f ] && f=$a; prev=$a; done
+    case "$*" in
+      *" config --format json")
+        python3 - "$f" "$KUMA_DIR" <<'PY'
+import json, re, sys
+vols = []
+for line in open(sys.argv[1]):
+    m = re.match(r"^\s+- (\./data|/[^:]+):([^:]+)(:ro)?$", line.rstrip())
+    if m:
+        src = m.group(1).replace("./data", sys.argv[2] + "/data")
+        vols.append({"type": "bind", "source": src, "target": m.group(2), "read_only": bool(m.group(3))})
+print(json.dumps({"name": "uptime-kuma", "services": {"uptime-kuma": {"image": "louislam/uptime-kuma:2", "restart": "unless-stopped",
+  "dns": ["192.168.0.162"], "environment": {"NODE_EXTRA_CA_CERTS": "/etc/ssl/certs/caddy-root.crt"}, "volumes": vols}}}))
+PY
+        ;;
+      *" up -d --no-deps --force-recreate --pull never -t 30 uptime-kuma")
+        src_of_compose "$f" > "$S/mount"; date -u +%Y-%m-%dT%H:%M:%S.%NZ > "$S/started" ;;
+      *) echo "stub compose: não suportado: $*" >&2; exit 2 ;;
+    esac ;;
+  *) echo "stub docker: não suportado: $*" >&2; exit 2 ;;
+esac

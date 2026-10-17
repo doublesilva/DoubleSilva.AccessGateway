@@ -1,0 +1,20 @@
+# Dashboard do smoke test (T06.4), servido em https://admin.home.doublesilva.com/status/ (host restrito a
+# group:home-admin pelo forward_auth do Authelia, importado antes deste snippet no site).
+# Os arquivos são gerados por home-smoke-publish em /opt/caddy/config/smoke-status e copiados por
+# accessgateway-status-sync para /srv/accessgateway/static/netdata-dashboard/status, montado SOMENTE LEITURA no Caddy
+# (/config/netdata-dashboard). Somente index.html e status.json existem no diretório; sem listagem; sem cache.
+# Rota exclusiva da Green (não existe na Blue): ignorada na paridade de rotas (tests/tools/caddy_parity.py).
+(status_dashboard) {
+	# Dentro de handle (e não "redir" solto), para ficar depois do forward_auth na ordem de diretivas.
+	# O "*" explícito é obrigatório: "redir /status/ 308" seria lido como matcher /status/ + destino "308".
+	handle /status {
+		redir * /status/ 308
+	}
+
+	handle_path /status/* {
+		root * /config/netdata-dashboard/status
+		header Cache-Control "no-store"
+		header X-Content-Type-Options "nosniff"
+		file_server
+	}
+}

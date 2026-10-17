@@ -5,7 +5,7 @@
 #   docker compose --env-file /srv/accessgateway/accessgateway.env -f compose.yml up -d
 #
 # Montagens com create_host_path=false: um diretório ausente faz o `up` falhar em vez de criar um diretório vazio.
-# Nenhum caminho da Blue é montado com escrita; a única montagem de caminho da Blue é casa-dashboard, somente leitura.
+# Nenhum caminho da Blue nem de outros projetos é montado (T07.4); tudo vem de /srv/accessgateway.
 
 name: accessgateway
 
@@ -43,10 +43,11 @@ services:
         source: ${GATEWAY_ROOT:-/srv/accessgateway}/static/netdata-dashboard
         target: /config/netdata-dashboard
         read_only: true
-      # Publicado pelo deploy do HomeAutomation; a Green só lê (sem alterar aquele projeto).
+      # Raiz PÚBLICA da CA para http://cert.home/caddy-root.crt (T07.4), publicada por scripts/publish-public-ca.sh.
+      # Substitui a montagem de /opt/caddy/config/casa-dashboard (Blue/HomeAutomation): nenhum caminho de outro projeto.
       - <<: *bind
-        source: ${CASA_DASHBOARD_DIR:-/opt/caddy/config/casa-dashboard}
-        target: /config/casa-dashboard
+        source: ${GATEWAY_ROOT:-/srv/accessgateway}/shared/public-certs
+        target: /config/public-certs
         read_only: true
     depends_on:
       authelia:

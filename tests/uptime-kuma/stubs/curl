@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+S=${KS:?}
+if [ "$(cat "$S/mount")" = "$KUMA_CANON_CA" ] && [ -e "$S/down_new" ]; then exit 7; fi
+exit 0

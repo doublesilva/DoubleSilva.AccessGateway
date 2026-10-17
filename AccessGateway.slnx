@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AccessGateway.Users/AccessGateway.Users.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AccessGateway.Users.Tests/AccessGateway.Users.Tests.csproj" />
+  </Folder>
+</Solution>

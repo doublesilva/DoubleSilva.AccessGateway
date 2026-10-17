@@ -1,7 +1,8 @@
 # Rotas comparadas entre Blue e Green (parity-check.sh) e base dos testes de validate-green.sh.
 # esquema	host	caminho	classe
 # Classes: fa = protegido por forward_auth (302 para o portal sem sessão); open = sem autenticação no proxy;
-#          redirect = 301 para *.home.doublesilva.com; auth = Authelia; http = porta HTTP.
+#          redirect = 301 para *.home.doublesilva.com; auth = Authelia; http = porta HTTP;
+#          push = chega ao Kuma sem redirecionamento (token inexistente → 404 do Kuma, sem efeito; T07.6.1).
 https	auth.home.doublesilva.com	/	auth
 https	auth.home.doublesilva.com	/api/health	auth
 https	auth.home.doublesilva.com	/.well-known/openid-configuration	auth
@@ -19,7 +20,11 @@ https	jarvis.home.doublesilva.com	/	fa
 https	ha.home.doublesilva.com	/	open
 https	mediamtx.home.doublesilva.com	/	open
 https	casa.home	/	open
-https	kuma.home	/	open
+https	kuma.home	/	redirect
+https	kuma.home	/dashboard	redirect
+https	kuma.home	/metrics	redirect
+https	kuma.home	/socket.io/?EIO=4&transport=polling	redirect
+https	kuma.home	/api/push/validate-green-inexistente	push
 https	frigate.home	/	open
 https	ha.home	/	open
 https	mediamtx.home	/	open

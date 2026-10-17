@@ -1,0 +1,240 @@
+# Caddyfile da Blue para ROLLBACK (R2.1). Gerado da baseline (tests/baseline/blue.Caddyfile, sha256 97138770…): idêntico,
+# exceto o alias kuma.home, que recebe o mesmo bloco da Green (T07.6.1). O Kuma não tem login próprio (SSO só pelo
+# Authelia); sem isto, um rollback para a Blue reabriria a administração do Kuma sem autenticação.
+# Instalado por scripts/rollback.sh --cutover em /opt/caddy/Caddyfile ANTES de iniciar o Caddy da Blue.
+kuma.home {
+    tls internal
+
+    @push {
+        method GET POST
+        path_regexp ^/api/push/[A-Za-z0-9_-]+$
+        expression {http.request.uri.path}.matches("^/api/push/[A-Za-z0-9_-]+$")
+    }
+
+    handle @push {
+        reverse_proxy 127.0.0.1:3001
+    }
+
+    handle {
+        redir https://kuma.home.doublesilva.com{uri} permanent
+    }
+}
+
+frigate.home {
+    tls internal
+
+    reverse_proxy https://127.0.0.1:8971 {
+        transport http {
+            tls_insecure_skip_verify
+        }
+    }
+}
+
+panel.home {
+    tls internal
+
+    redir https://panel.home.doublesilva.com{uri} permanent
+}
+
+adguard.home {
+    tls internal
+    redir https://adguard.home.doublesilva.com{uri} permanent
+}
+
+portainer.home {
+    tls internal
+    redir https://portainer.home.doublesilva.com{uri} permanent
+}
+
+ha.home {
+    tls internal
+    reverse_proxy 192.168.0.166:80
+}
+
+mediamtx.home {
+    tls internal
+    reverse_proxy 127.0.0.1:8889
+}
+
+netdata.home {
+    tls internal
+
+    # API utilizada pelo nosso dashboard e pelo Netdata
+    handle /api/* {
+        reverse_proxy 127.0.0.1:19999
+    }
+
+    # Dashboard completo/legado do Netdata
+    handle /v1 {
+        reverse_proxy 127.0.0.1:19999
+    }
+
+    handle /v1/* {
+        reverse_proxy 127.0.0.1:19999
+    }
+
+    # Nossa página principal simplificada
+    handle {
+        root * /config/netdata-dashboard
+        file_server
+    }
+}
+
+casa.home {
+    tls internal
+
+    reverse_proxy 127.0.0.1:5300
+}
+
+http://cert.home {
+    @rootCert path /caddy-root.crt
+
+    handle @rootCert {
+        root * /config/casa-dashboard
+        header Content-Type application/x-x509-ca-cert
+        file_server
+    }
+
+    handle {
+        respond "Not Found" 404
+    }
+}
+
+auth.home.doublesilva.com {
+    tls internal
+
+    reverse_proxy 127.0.0.1:9091
+}
+
+panel.home.doublesilva.com {
+    tls internal
+
+    # Streaming WHEP: deixa a autenticação a cargo do próprio Panel.
+    # Não usar handle_path, pois o ASP.NET precisa receber /stream/...
+    handle /stream/* {
+        reverse_proxy 127.0.0.1:5200
+    }
+
+    handle {
+        forward_auth 127.0.0.1:9091 {
+            uri /api/authz/forward-auth
+            copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+        }
+
+        reverse_proxy 127.0.0.1:5200
+    }
+}
+
+kuma.home.doublesilva.com {
+    tls internal
+
+    forward_auth 127.0.0.1:9091 {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+    }
+
+    reverse_proxy 127.0.0.1:3001
+}
+
+netdata.home.doublesilva.com {
+    tls internal
+
+    forward_auth 127.0.0.1:9091 {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+    }
+
+    reverse_proxy 127.0.0.1:19999
+}
+
+admin.home.doublesilva.com {
+    tls internal
+
+    forward_auth 127.0.0.1:9091 {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+    }
+
+    # API utilizada pelo dashboard
+    handle /api/* {
+        reverse_proxy 127.0.0.1:19999
+    }
+
+    # Compatibilidade com chamadas atuais do Netdata
+    handle /v1 {
+        reverse_proxy 127.0.0.1:19999
+    }
+
+    handle /v1/* {
+        reverse_proxy 127.0.0.1:19999
+    }
+
+    # Central administrativa
+    handle {
+        root * /config/netdata-dashboard
+        file_server
+    }
+}
+
+adguard.home.doublesilva.com {
+    tls internal
+
+    forward_auth 127.0.0.1:9091 {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+    }
+
+    reverse_proxy 127.0.0.1:3000
+}
+
+portainer.home.doublesilva.com {
+    tls internal
+
+    forward_auth 127.0.0.1:9091 {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+    }
+
+    reverse_proxy https://127.0.0.1:9443 {
+        transport http {
+            tls_insecure_skip_verify
+        }
+    }
+}
+
+frigate.home.doublesilva.com {
+    tls internal
+
+    forward_auth 127.0.0.1:9091 {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+    }
+
+    reverse_proxy https://127.0.0.1:8971 {
+        transport http {
+            tls_insecure_skip_verify
+        }
+    }
+}
+
+ha.home.doublesilva.com {
+    tls internal
+
+    reverse_proxy 192.168.0.166:80
+}
+
+mediamtx.home.doublesilva.com {
+    tls internal
+    reverse_proxy 127.0.0.1:8889
+}
+
+jarvis.home.doublesilva.com {
+    tls internal
+
+    forward_auth 127.0.0.1:9091 {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+    }
+
+    reverse_proxy 127.0.0.1:5500
+}

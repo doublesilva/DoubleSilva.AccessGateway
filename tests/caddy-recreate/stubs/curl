@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Stub do curl para tests/caddy-recreate: responde conforme as montagens atuais (stub docker).
+S=${CR:?}
+out=/dev/null; url=""
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; http://*|https://*) url=$1 ;; esac; shift; done
+newcfg=0; grep -q 'public-certs' "$S/mounts" && newcfg=1
+if [ "$newcfg" = 1 ] && [ -e "$S/bad_new" ]; then printf 000; exit 7; fi
+case "$url" in
+  https://auth.home.doublesilva.com/api/health) printf 200 ;;
+  https://admin.home.doublesilva.com/status/) printf 302 ;;
+  http://cert.home/caddy-root.crt)
+    if [ "$newcfg" = 1 ]; then cp "$GATEWAY_ROOT/shared/public-certs/caddy-root.crt" "$out"; printf 200; else : > "$out"; printf 404; fi ;;
+  *) printf 000; exit 7 ;;
+esac

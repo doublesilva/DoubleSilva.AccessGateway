@@ -1,0 +1,47 @@
+# T09.3.3 — Laboratório isolado de concorrência no users_database.yml.
+#
+# Mesmo backend da produção (file, watch: true, argon2 padrão) na mesma versão (imagem fixada em run.sh).
+# Diferenças só para o ensaio: log em debug (mostra os reloads pulados), domínio fictício, sem limites de taxa na
+# elevação de sessão e sem banimento por tentativas. Segredos fictícios gerados a cada execução (variáveis de ambiente).
+
+server:
+  address: 'tcp://0.0.0.0:9091/'
+  endpoints:
+    rate_limits:
+      session_elevation_start:
+        enable: false
+      session_elevation_finish:
+        enable: false
+
+log:
+  level: debug
+
+authentication_backend:
+  password_reset:
+    disable: true
+
+  file:
+    path: '/data/users_database.yml'
+    watch: true
+
+    password:
+      algorithm: argon2
+
+access_control:
+  default_policy: one_factor
+
+session:
+  cookies:
+    - domain: 'example.test'
+      authelia_url: 'https://auth.example.test'
+
+regulation:
+  max_retries: 1000
+
+storage:
+  local:
+    path: '/data/db.sqlite3'
+
+notifier:
+  filesystem:
+    filename: '/data/notification.txt'

@@ -1,0 +1,46 @@
+# Matriz de integração (app-integration-check.sh). Campos separados por TAB:
+# aplicação	host	caminho	auth(none|user|admin = sessão de teste da Green para a coluna autenticada)	upstream direto (ou -)	modo(corpo|-)
+# Caminhos escolhidos para não disparar o OIDC das aplicações (que abriria PAR no Authelia da Blue).
+#
+# HomeAutomation — OutHome (casa.home: sem forward_auth; autenticação OIDC própria; /bff e /stream → 401 sem desafio)
+OutHome	casa.home	/	none	-	-
+OutHome	casa.home	/bff/session	none	-	-
+OutHome	casa.home	/bff/gate/status	none	-	-
+OutHome	casa.home	/stream/t033	none	-	-
+OutHome	casa.home	/api/health	none	-	-
+# HomeAutomation — Panel (forward_auth home-user|home-admin + OIDC próprio; /stream sem cookie do Panel → 401)
+Panel	panel.home.doublesilva.com	/stream/t033	user	http://127.0.0.1:5200/stream/t033	-
+Panel	panel.home.doublesilva.com	/stream/t033	admin	http://127.0.0.1:5200/stream/t033	-
+Panel	panel.home.doublesilva.com	/favicon.png	user	http://127.0.0.1:5200/favicon.png	corpo
+Panel	panel.home	/	none	-	-
+# HomeAutomation — Central administrativa (forward_auth home-admin; página estática + API do Netdata)
+Admin	admin.home.doublesilva.com	/	admin	-	-
+Admin	admin.home.doublesilva.com	/api/v1/info	admin	http://127.0.0.1:19999/api/v1/info	-
+# Jarvis (forward_auth home-admin; BFF + SPA)
+Jarvis	jarvis.home.doublesilva.com	/health	admin	http://127.0.0.1:5500/health	corpo
+Jarvis	jarvis.home.doublesilva.com	/	admin	http://127.0.0.1:5500/	corpo
+# Frigate (forward_auth home-user|home-admin + autenticação própria do Frigate)
+Frigate	frigate.home.doublesilva.com	/	user	https://127.0.0.1:8971/	-
+Frigate	frigate.home.doublesilva.com	/api/version	user	https://127.0.0.1:8971/api/version	-
+Frigate	frigate.home	/	none	-	-
+# Home Assistant (sem forward_auth; autenticação própria do HA)
+HomeAssistant	ha.home.doublesilva.com	/	none	-	-
+HomeAssistant	ha.home.doublesilva.com	/api/	none	-	-
+HomeAssistant	ha.home	/	none	-	-
+# Portainer (forward_auth home-admin + autenticação própria)
+Portainer	portainer.home.doublesilva.com	/	admin	https://127.0.0.1:9443/	-
+Portainer	portainer.home.doublesilva.com	/api/status	admin	https://127.0.0.1:9443/api/status	-
+Portainer	portainer.home	/	none	-	-
+# Uptime Kuma (forward_auth home-admin + login próprio desde a T07.6.1; alias .home: só /api/push/<token>, o resto 301)
+UptimeKuma	kuma.home.doublesilva.com	/	admin	http://127.0.0.1:3001/	-
+UptimeKuma	kuma.home	/	none	-	-
+# AdGuard (forward_auth home-admin + autenticação própria)
+AdGuard	adguard.home.doublesilva.com	/	admin	http://127.0.0.1:3000/	-
+AdGuard	adguard.home.doublesilva.com	/control/status	admin	http://127.0.0.1:3000/control/status	-
+AdGuard	adguard.home	/	none	-	-
+# Netdata (forward_auth home-admin; alias .home sem forward_auth)
+Netdata	netdata.home.doublesilva.com	/api/v1/info	admin	http://127.0.0.1:19999/api/v1/info	-
+Netdata	netdata.home	/api/v1/info	none	-	-
+# MediaMTX (sem forward_auth; autenticação própria por caminho)
+MediaMTX	mediamtx.home.doublesilva.com	/	none	-	-
+MediaMTX	mediamtx.home	/	none	-	-

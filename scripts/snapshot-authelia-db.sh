@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ============================================================================================================
+# AVISO (T07.2): a Green está EM PRODUÇÃO desde 11/10/2026.
+# NÃO execute --install: substituiria o banco do Authelia da Green pela cópia do banco da Blue (perde sessões e
+# consentimentos da produção). Uso histórico: E3 do cutover. Ver docs/T07.1-inventario.md.
+# ============================================================================================================
 # Snapshot consistente do SQLite do Authelia Blue para a Green (T03/T04).
 #
 # Executa scripts/snapshot/authelia_snapshot.py num container Python descartável:

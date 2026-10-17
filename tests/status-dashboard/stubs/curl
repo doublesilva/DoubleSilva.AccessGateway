@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Stub do curl: auth /api/health pelo gateway responde 200 (ou $RS/health_code)
+S=${RS:?}
+printf '%s' "$(cat "$S/health_code" 2>/dev/null || echo 200)"

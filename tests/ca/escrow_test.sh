@@ -10,8 +10,9 @@ set -Eeuo pipefail
 apt-get update -qq >/dev/null && apt-get install -y -qq gnupg openssl util-linux >/dev/null
 
 PKI=/tmp/pki
-OUT=/tmp/out
-mkdir -p "$PKI" "$OUT"
+OUT=/mnt/midia   # tmpfs montado pelo docker run (simula a mídia removível)
+mkdir -p "$PKI"
+findmnt -n "$OUT" >/dev/null || { echo "FALHA: $OUT precisa ser um ponto de montagem (docker run --tmpfs $OUT)"; exit 1; }
 openssl ecparam -name prime256v1 -genkey -noout -out "$PKI/root.key"
 openssl req -x509 -new -key "$PKI/root.key" -subj "/CN=Teste Local Authority - ECC Root" -days 3650 -out "$PKI/root.crt"
 openssl ecparam -name prime256v1 -genkey -noout -out "$PKI/intermediate.key"
@@ -23,6 +24,14 @@ ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP=$(openssl x509 -in "$PKI/root.crt" -noout -f
 export ACCESSGATEWAY_TEST_EXPECTED_ROOT_FP
 
 PASS='senha-de-teste-ficticia'
+
+# Destino no disco do sistema (diretório comum, mídia não montada) deve ser recusado antes de pedir senha.
+mkdir -p /media/usb-nao-montado
+if printf '%s\n%s\n' "$PASS" "$PASS" | script -qec "/repo/scripts/ca-escrow-export.sh --source $PKI --output /media/usb-nao-montado" /dev/null > /tmp/naomontado.log 2>&1; then
+  echo "FALHA: aceitou destino no disco do sistema"; exit 1
+fi
+grep -q 'está no disco do sistema' /tmp/naomontado.log || { cat /tmp/naomontado.log; echo "FALHA: mensagem de recusa"; exit 1; }
+[ -z "$(ls -A /media/usb-nao-montado)" ] || { echo "FALHA: algo foi gravado no disco do sistema"; exit 1; }
 # export: senha + confirmação; verify automático: senha.
 printf '%s\n%s\n%s\n' "$PASS" "$PASS" "$PASS" \
   | script -qec "/repo/scripts/ca-escrow-export.sh --source $PKI --output $OUT" /dev/null > /tmp/export.log 2>&1 \
@@ -39,4 +48,4 @@ grep -q "não foi possível decifrar" /tmp/wrong.log || { cat /tmp/wrong.log; ec
 
 if ls /dev/shm/ca-escrow-* >/dev/null 2>&1; then echo "FALHA: restos em /dev/shm"; exit 1; fi
 
-echo "escrow ok: export cifrado (sem texto puro), verificação com senha correta, recusa com senha errada, tmpfs limpo"
+echo "escrow ok: recusa destino no disco do sistema; export cifrado na mídia (sem texto puro); senha correta verifica; senha errada recusada; tmpfs limpo"

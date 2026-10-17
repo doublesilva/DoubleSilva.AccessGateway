@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+if [ "$#" -ne 0 ]; then
+    echo "ERRO: este script não aceita argumentos."
+    exit 2
+fi
+
+SOURCE="/srv/homeautomation-deploy/release"
+TARGET="/home/diego/containers/homeautomation"
+LOCK="/run/lock/homeautomation-deploy.lock"
+
+umask 077
+
+exec 9>"$LOCK"
+
+if ! flock -n 9; then
+    echo "ERRO: já existe um deploy em execução."
+    exit 3
+fi
+
+echo "==> Validando release..."
+
+if [ ! -f "$SOURCE/docker-compose.yml" ]; then
+    echo "ERRO: docker-compose.yml não encontrado."
+    exit 10
+fi
+
+if [ ! -d "$SOURCE/src" ]; then
+    echo "ERRO: diretório src não encontrado."
+    exit 11
+fi
+
+#
+# Não permitimos symlinks enviados pelo pipeline.
+#
+if find "$SOURCE" -type l -print -quit | grep -q .; then
+    echo "ERRO: release contém symbolic links."
+    exit 12
+fi
+
+#
+# Segredos/dados que jamais devem vir do GitHub.
+#
+if [ -e "$SOURCE/.env" ]; then
+    echo "ERRO: release contém .env."
+    exit 13
+fi
+
+if [ -e "$SOURCE/infrastructure/api/keys" ]; then
+    echo "ERRO: release contém API Data Protection keys."
+    exit 14
+fi
+
+if [ -e "$SOURCE/infrastructure/api/data" ]; then
+    echo "ERRO: release contém banco/dados da API."
+    exit 15
+fi
+
+if [ -e "$SOURCE/infrastructure/frigate/mosquitto/config/password_file" ]; then
+    echo "ERRO: release contém password_file do Mosquitto."
+    exit 16
+fi
+
+if [ -e "$SOURCE/infrastructure/mediamtx/mediamtx.yml" ]; then
+    echo "ERRO: release contém configuração privada do MediaMTX."
+    exit 17
+fi
+
+if find "$SOURCE" -type f \
+    \( -name '*.db' \
+       -o -name '*.db-wal' \
+       -o -name '*.db-shm' \
+       -o -name '*.pfx' \
+       -o -name '*.p12' \
+       -o -name '*.key' \) \
+    -print -quit | grep -q .; then
+
+    echo "ERRO: release contém arquivo potencialmente sensível."
+    exit 18
+fi
+
+#
+# Confirma que os dados essenciais de produção existem.
+#
+if [ ! -f "$TARGET/.env" ]; then
+    echo "ERRO: .env de produção não encontrado."
+    exit 20
+fi
+
+if [ ! -d "$TARGET/infrastructure/api/keys" ]; then
+    echo "ERRO: Data Protection keys de produção não encontradas."
+    exit 21
+fi
+
+if [ ! -f "$TARGET/infrastructure/mediamtx/mediamtx.yml" ]; then
+    echo "ERRO: mediamtx.yml de produção não encontrado."
+    exit 22
+fi
+
+#
+# PRE-FLIGHT
+#
+# Copiamos o código para uma área root temporária,
+# adicionamos apenas o .env de produção e fazemos
+# config/build antes de tocar no código em produção.
+#
+WORK="$(mktemp -d /var/tmp/homeautomation-deploy.XXXXXX)"
+
+cleanup() {
+    rm -rf "$WORK"
+}
+
+trap cleanup EXIT
+
+echo "==> Preparando pre-flight..."
+
+rsync -rlt \
+    "$SOURCE/" \
+    "$WORK/"
+
+cp "$TARGET/.env" "$WORK/.env"
+
+chmod 600 "$WORK/.env"
+
+cd "$WORK"
+
+echo "==> Validando Docker Compose..."
+
+docker compose \
+    -p homeautomation \
+    config -q
+
+echo "==> Build de validação..."
+
+docker compose \
+    -p homeautomation \
+    build
+
+#
+# Só chegamos aqui se config e build funcionaram.
+#
+echo "==> Sincronizando código com produção..."
+
+rsync -rlt \
+    --delete \
+    --safe-links \
+    --chown=diego:diego \
+    --exclude='.git/' \
+    --exclude='.env' \
+    --exclude='.env.*' \
+    --exclude='**/bin/' \
+    --exclude='**/obj/' \
+    --exclude='infrastructure/api/data/' \
+    --exclude='infrastructure/api/keys/' \
+    --exclude='infrastructure/panel/data/' \
+    --exclude='infrastructure/frigate/frigate-storage/' \
+    --exclude='infrastructure/frigate/frigate-config/' \
+    --exclude='infrastructure/frigate/mosquitto/config/password_file' \
+    --exclude='infrastructure/mediamtx/mediamtx.yml' \
+    --exclude='*.db' \
+    --exclude='*.db-wal' \
+    --exclude='*.db-shm' \
+    --exclude='*.bak' \
+    --exclude='*.bak-*' \
+    "$SOURCE/" \
+    "$TARGET/"
+
+#
+# Publica o dashboard estático casa.home no Caddy.
+#
+CADDY_DASHBOARD_SOURCE="$TARGET/infrastructure/caddy/casa-dashboard"
+CADDY_DASHBOARD_TARGET="/opt/caddy/config/casa-dashboard"
+
+if [ -f "$CADDY_DASHBOARD_SOURCE/index.html" ]; then
+
+    echo "==> Publicando casa.home..."
+
+    install \
+        -d \
+        -m 755 \
+        -o root \
+        -g root \
+        "$CADDY_DASHBOARD_TARGET"
+
+    rsync -rlt \
+        --delete \
+        --chown=root:root \
+        "$CADDY_DASHBOARD_SOURCE/" \
+        "$CADDY_DASHBOARD_TARGET/"
+fi
+
+cd "$TARGET"
+
+echo "==> Validando produção..."
+
+docker compose \
+    -p homeautomation \
+    config -q
+
+echo "==> Aplicando containers..."
+
+docker compose \
+    -p homeautomation \
+    up -d \
+    --remove-orphans
+
+echo "==> Aguardando API..."
+
+HEALTH_OK=0
+
+for attempt in $(seq 1 20); do
+
+    if curl \
+        --silent \
+        --fail \
+        --max-time 3 \
+        http://127.0.0.1:5100/health \
+        >/dev/null; then
+
+        HEALTH_OK=1
+        break
+    fi
+
+    sleep 2
+done
+
+if [ "$HEALTH_OK" -ne 1 ]; then
+    echo "ERRO: API não ficou saudável após o deploy."
+    exit 30
+fi
+
+echo
+echo "=========================================="
+echo " Deploy HomeAutomation concluído"
+echo "=========================================="
+
+docker compose \
+    -p homeautomation \
+    ps

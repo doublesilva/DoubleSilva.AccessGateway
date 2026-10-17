@@ -1,11 +1,29 @@
 # Hosts locais *.home (reescritas explícitas no AdGuard → 192.168.0.162).
 # Mesma ordem da Blue, para que o JSON adaptado seja idêntico.
 # Paridade com a Blue: estes aliases não passam pelo Authelia (achado de segurança registrado no inventário).
+# Exceção: kuma.home (T07.6.1, fora da paridade).
 
+# T07.6.1: o alias só entrega o push dos monitores (home-smoke-publish usa https://kuma.home/api/push/<token>).
+# Interface, Socket.IO, /metrics, badges e status pages → 301 para kuma.home.doublesilva.com (forward_auth home-admin).
 kuma.home {
 	tls internal
 
-	reverse_proxy 127.0.0.1:3001
+	# path_regexp casa com o caminho NORMALIZADO, mas o upstream recebe o caminho CRU: "/socket.io/../api/push/x" casaria
+	# e chegaria ao engine.io do Kuma (handshake administrativo). Por isso o caminho cru também tem de ser exatamente
+	# /api/push/<token>, com um charset sem ".", "%" ou "/" (tokens do Kuma são alfanuméricos).
+	@push {
+		method GET POST
+		path_regexp ^/api/push/[A-Za-z0-9_-]+$
+		expression {http.request.uri.path}.matches("^/api/push/[A-Za-z0-9_-]+$")
+	}
+
+	handle @push {
+		reverse_proxy 127.0.0.1:3001
+	}
+
+	handle {
+		redir https://kuma.home.doublesilva.com{uri} permanent
+	}
 }
 
 frigate.home {
@@ -58,13 +76,14 @@ casa.home {
 	reverse_proxy 127.0.0.1:5300
 }
 
-# Distribuição da raiz da CA interna (somente HTTP). O arquivo vem de /config/casa-dashboard, publicado pelo
-# deploy do HomeAutomation (montado somente leitura na Green).
+# Distribuição da raiz PÚBLICA da CA interna (somente HTTP: o dispositivo ainda não confia na CA). Desde a T07.4 o
+# arquivo vem de /config/public-certs (scripts/publish-public-ca.sh; montagem somente leitura), não mais do
+# casa-dashboard publicado pelo HomeAutomation em /opt/caddy. Contrato preservado: mesma URL e mesmo Content-Type.
 http://cert.home {
 	@rootCert path /caddy-root.crt
 
 	handle @rootCert {
-		root * /config/casa-dashboard
+		root * /config/public-certs
 		header Content-Type application/x-x509-ca-cert
 		file_server
 	}

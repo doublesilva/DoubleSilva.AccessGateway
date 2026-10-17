@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Stub de ss: "ss -ltnH 'sport = :P'" imprime uma linha se a porta P estiver ocupada no estado simulado.
+S=${STUB_STATE:?}
+run() { [ -e "$S/running/$1" ]; }
+p=$(grep -oE ':[0-9]+' <<<"$*" | tail -1 | tr -d :)
+gp=$(cat "$S/green_port" 2>/dev/null)
+busy=0
+case "$p" in
+  80|443) run caddy && busy=1; run accessgateway-caddy && [ "$gp" = 443 ] && busy=1 ;;
+  18080|18443|2020) run accessgateway-caddy && [ "$gp" = 18443 ] && busy=1 ;;
+  19091) run accessgateway-authelia && busy=1 ;;
+esac
+[ "$busy" = 1 ] && echo "LISTEN 0 4096 *:$p *:*"
+exit 0

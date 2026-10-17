@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ============================================================================================================
+# AVISO (T07.2): a Green está EM PRODUÇÃO desde 11/10/2026.
+# NÃO execute --apply: recopiaria PKI, segredos, usuários e configuração DA BLUE PARA A GREEN, sobrescrevendo dados
+# de produção. Mantido só como referência histórica (T03). Ver /opt/caddy/README-PRODUCAO.md e docs/T07.1-inventario.md.
+# ============================================================================================================
 # Provisiona /srv/accessgateway a partir da Blue (T03). Cópia LOCAL no host: nenhum segredo trafega pela rede,
 # é impresso ou vai para o Git. A Blue é apenas lida.
 #
