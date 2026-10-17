@@ -1,0 +1,27 @@
+# Override SOMENTE para tests/backend-switch/run.sh (T09.3.8), aplicado pelo compose_green/compose_lldap
+# (GATEWAY_COMPOSE_TEST_OVERRIDE) sobre o compose.yml REAL (+ compose.lldap.yml no backend ldap):
+#   - containers próprios (nunca accessgateway-*); o Caddy nunca é iniciado;
+#   - Authelia e LLDAP numa rede interna, sem saída e sem portas publicadas;
+#   - healthcheck do LLDAP mais curto, só para o laboratório não esperar ~40 s por cada "unhealthy" (mesmo comando).
+services:
+  caddy:
+    container_name: agswitch-caddy
+  authelia:
+    container_name: agswitch-authelia
+    ports: !reset []
+    networks:
+      - internal
+  lldap:
+    container_name: agswitch-lldap
+    networks:
+      - internal
+    healthcheck:
+      interval: 3s
+      timeout: 3s
+      retries: 2
+      start_period: 20s
+
+networks:
+  internal:
+    name: agswitch_internal
+    internal: true

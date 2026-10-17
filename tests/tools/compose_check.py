@@ -30,14 +30,21 @@ LLDAP_SECRET_FILES = {"LLDAP_KEY_SEED_FILE": "/secrets/KEY_SEED", "LLDAP_JWT_SEC
 LLDAP_PLAIN_SECRETS = ("LLDAP_KEY_SEED", "LLDAP_JWT_SECRET", "LLDAP_LDAP_USER_PASS")
 
 
+def argval(flag, default):
+    argv = sys.argv
+    return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else default
+
+
 def check_lldap(svc, errors):
     def need(cond, msg):
         if not cond:
             errors.append(f"lldap: {msg}")
 
     env = svc.get("environment", {})
+    # --lldap-container: o nome que os scripts de implantação usam (GREEN_LLDAP; só os laboratórios o trocam)
+    expected_name = argval("--lldap-container", "accessgateway-lldap")
     need(svc.get("profiles") == ["lldap"], f"deve estar só no perfil 'lldap' (profiles={svc.get('profiles')})")
-    need(svc.get("container_name") == "accessgateway-lldap", f"container_name={svc.get('container_name')!r}")
+    need(svc.get("container_name") == expected_name, f"container_name={svc.get('container_name')!r}, esperado {expected_name!r}")
     need(svc.get("restart") == "unless-stopped", f"restart={svc.get('restart')!r}")
     need(not svc.get("ports"), f"não pode publicar portas: {svc.get('ports')}")
     need(svc.get("command") == ["run", "--config-file", LLDAP_CONFIG], f"command={svc.get('command')}")
@@ -91,6 +98,18 @@ def main():
         config = json.load(f)
     services = config["services"]
     errors = []
+    if "--lldap-only" in sys.argv[2:]:
+        # Render do ambiente REAL (portas 80/443): só as regras do Authelia no LDAP e do LLDAP (authelia-backend.sh).
+        if "lldap" in services:
+            check_lldap(services["lldap"], errors)
+        else:
+            errors.append("lldap ausente do render (faltou --profile lldap)")
+        check_authelia_backend(services["authelia"], True, errors)
+        if errors:
+            print("ERRO:\n  " + "\n  ".join(errors))
+            return 1
+        print("OK: Authelia no backend LDAP (configuration.ldap.yml ro, senha por arquivo, depende do lldap saudável); LLDAP sem portas")
+        return 0
     cutover = "--expect-lldap-cutover" in sys.argv[2:]
     expect_lldap = cutover or "--expect-lldap" in sys.argv[2:]
     if expect_lldap:

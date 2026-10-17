@@ -122,8 +122,10 @@ N=/repo/infra/home-server-backup/backup.conf
 check "baseline da T07.5.1 = KNOWN_PREVIOUS do instalador" bash -c \
   "[ \"\$(sha256sum < $B | cut -d' ' -f1)\" = \"\$(sed -n 's/^KNOWN_PREVIOUS=\([0-9a-f]*\).*/\1/p' $I)\" ]"
 check "backup.conf novo: sem /opt/caddy e sem o Authelia da Blue" bash -c "! grep -vE '^[[:space:]]*#' $N | grep -qE '/opt/caddy|/home/diego/containers/authelia'"
-check "backup.conf novo: diferença para a T07.5.1 = só remoções da Blue (+ 3 comentários)" bash -c "
-  diff $B $N | grep '^>' | grep -vE '^> +#' && exit 1
+# T09.3.8: as ÚNICAS linhas novas (fora comentários) são as duas do LLDAP: o snapshot do banco e a exclusão das senhas
+# iniciais da migração. Qualquer outra adição continua reprovando.
+check "backup.conf novo: diferença para a T07.5.1 = remoções da Blue + 2 linhas do LLDAP (T09.3.8) + comentários" bash -c "
+  [ \"\$(diff $B $N | grep '^>' | grep -vE '^> +#' | sed 's/^> *//' | sort | tr '\n' ' ')\" = '\"accessgateway-lldap|/srv/accessgateway/data/lldap/users.db\" /srv/accessgateway/secrets/migration ' ] || exit 1
   [ \"\$(diff $B $N | grep '^<' | grep -vE '^< +#' | sed 's/^< *//' | sort | tr '\n' ' ')\" = '\"authelia|/home/diego/containers/authelia/config/db.sqlite3\" /opt/caddy /opt/caddy/data/caddy/certificates /opt/caddy/data/caddy/locks ' ]"
 check "backup.conf novo: Green, CA canônica e bancos mantidos" bash -c "grep -qx '  /srv/accessgateway' $N && grep -qx '  /etc/accessgateway' $N && grep -q '\"accessgateway-authelia|/srv/accessgateway/data/authelia/db.sqlite3\"' $N && grep -q '\"uptime-kuma|' $N && grep -qx '  /srv/accessgateway/data/caddy/caddy/certificates' $N"
 export BACKUP_CONF_DST=/tmp/etc/backup.conf; mkdir -p /tmp/etc; install -m 600 $B "$BACKUP_CONF_DST"

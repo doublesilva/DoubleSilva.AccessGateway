@@ -1,0 +1,11 @@
+[Unit]
+Description=Verifica o LLDAP do AccessGateway a cada minuto (T09.3.8)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=accessgateway-lldap-health.service
+
+[Install]
+WantedBy=timers.target

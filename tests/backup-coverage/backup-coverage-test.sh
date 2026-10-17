@@ -65,5 +65,36 @@ check "banco ativo da Green copiado como arquivo: FAIL" bash -c "! $CHK > /tmp/o
 listing "${FUTURO[@]}" "${BLUE[@]}"
 check "snapshot de hoje (Blue ainda no backup): PASS (pode rodar antes da R4)" bash -c "$CHK > /tmp/o.log; grep -q 'RESULTADO: 25 PASS, 0 pendente(s), 0 FAIL' /tmp/o.log"
 
+# T09.3.8 — LLDAP: só é exigido depois de provisionado no host (marcador). Sem o marcador, nada muda (casos acima).
+LLDAP_ITEMS=(
+  "$G/secrets/lldap/KEY_SEED" "$G/secrets/lldap/JWT_SECRET" "$G/secrets/lldap/ADMIN_PASSWORD" "$G/secrets/authelia/LDAP_PASSWORD"
+  "$S/accessgateway-lldap/users.db" "$G/app/compose.lldap.yml" "$G/app/authelia/configuration.ldap.yml" "$G/app/lldap/lldap_config.toml"
+)
+touch /tmp/lldap-marker
+LCHK="env LLDAP_MARKER=/tmp/lldap-marker $CHK"
+
+listing "${FUTURO[@]}" "${LLDAP_ITEMS[@]}"
+check "LLDAP provisionado e coberto: 35 PASS, 0 FAIL (KEY_SEED, JWT, admin, senha de serviço, snapshot, compose e configs)" \
+  bash -c "$LCHK > /tmp/o.log; grep -q 'RESULTADO: 35 PASS, 0 pendente(s), 0 FAIL' /tmp/o.log"
+check "LLDAP: banco vivo fora do backup e senhas de migração fora do backup (PASS nominal)" \
+  bash -c "grep -q 'PASS\] LLDAP .*banco ativo do LLDAP fora do backup' /tmp/o.log && grep -q 'PASS\] LLDAP .*senhas iniciais da migração fora do backup' /tmp/o.log"
+
+all=1
+for item in "${LLDAP_ITEMS[@]}"; do
+  rest=(); for x in "${LLDAP_ITEMS[@]}"; do [ "$x" = "$item" ] || rest+=("$x"); done
+  listing "${FUTURO[@]}" "${rest[@]}"
+  if $LCHK > /tmp/o.log 2>&1 || ! grep -F "[FAIL]" /tmp/o.log | grep -qF "$item"; then
+    all=0; bad "ausência de $item não reprovada (LLDAP provisionado)"
+  fi
+done
+[ "$all" = 1 ] && ok "cada um dos 8 itens do LLDAP ausente: FAIL nominal (a KEY_SEED é exigida à parte do banco)"
+
+listing "${FUTURO[@]}" "${LLDAP_ITEMS[@]}" "$G/data/lldap/users.db"
+check "banco ativo do LLDAP copiado como arquivo: FAIL" bash -c "! $LCHK > /tmp/o.log && grep -q 'banco ativo do LLDAP copiado como arquivo' /tmp/o.log"
+listing "${FUTURO[@]}" "${LLDAP_ITEMS[@]}" "$G/secrets/migration/diego.password"
+check "senha inicial da migração no backup: FAIL" bash -c "! $LCHK > /tmp/o.log && grep -q 'senhas iniciais da migração no backup' /tmp/o.log"
+listing "${FUTURO[@]}"
+check "LLDAP não provisionado e ausente do backup: sem exigência (25 PASS)" bash -c "$CHK > /tmp/o.log; grep -q 'RESULTADO: 25 PASS, 0 pendente(s), 0 FAIL' /tmp/o.log"
+
 printf '\nRESULTADO: %d PASS, %d FAIL\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

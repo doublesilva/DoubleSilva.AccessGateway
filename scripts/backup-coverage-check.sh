@@ -62,6 +62,29 @@ need "Kuma"        "$S/uptime-kuma/kuma.db"
 need "Kuma"        /home/diego/containers/uptime-kuma/compose.yaml
 need "Kuma"        /root/.uptime-kuma-backup-push.conf
 need "Kuma"        /etc/home-smoke-test/kuma-push-url
+# LLDAP (T09.3.8): exigido só depois de provisionado no host (marcador = KEY_SEED). Sem a KEY_SEED o banco não serve
+# (T09.3.5), então ela é exigida à parte do snapshot do banco; o users.db vivo nunca vai como arquivo.
+LLDAP_MARKER=${LLDAP_MARKER:-$G/secrets/lldap/KEY_SEED}
+if [ -e "$LLDAP_MARKER" ]; then
+  need "LLDAP"     "$G/secrets/lldap/KEY_SEED"
+  need "LLDAP"     "$G/secrets/lldap/JWT_SECRET"
+  need "LLDAP"     "$G/secrets/lldap/ADMIN_PASSWORD"
+  need "LLDAP"     "$G/secrets/authelia/LDAP_PASSWORD"
+  need "LLDAP"     "$S/accessgateway-lldap/users.db"
+  need "LLDAP"     "$G/app/compose.lldap.yml"
+  need "LLDAP"     "$G/app/authelia/configuration.ldap.yml"
+  need "LLDAP"     "$G/app/lldap/lldap_config.toml"
+  if grep -qE '^/srv/accessgateway/data/lldap/users\.db$' "$LIST"; then
+    printf '[FAIL] %-12s banco ativo do LLDAP copiado como arquivo (deveria ir só por snapshot)\n' LLDAP; FAIL=$((FAIL + 1))
+  else
+    printf '[PASS] %-12s banco ativo do LLDAP fora do backup (somente o snapshot)\n' LLDAP; PASS=$((PASS + 1))
+  fi
+  if grep -qE '^/srv/accessgateway/secrets/migration(/|$)' "$LIST"; then
+    printf '[FAIL] %-12s senhas iniciais da migração no backup (secrets/migration deve ser excluído)\n' LLDAP; FAIL=$((FAIL + 1))
+  else
+    printf '[PASS] %-12s senhas iniciais da migração fora do backup\n' LLDAP; PASS=$((PASS + 1))
+  fi
+fi
 if grep -qE '^/srv/accessgateway/data/authelia/db\.sqlite3$' "$LIST"; then
   printf '[FAIL] %-12s banco ativo da Green copiado como arquivo (deveria ir só por snapshot)\n' Green; FAIL=$((FAIL + 1))
 else

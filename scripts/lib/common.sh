@@ -27,7 +27,8 @@ OIDC_CLIENTS=(homeautomation-panel homeautomation-outhome jarvis-home saldo360)
 
 # Green e cutover (T04)
 GREEN_CADDY=accessgateway-caddy
-GREEN_AUTHELIA=accessgateway-authelia
+GREEN_AUTHELIA="${GREEN_AUTHELIA:-accessgateway-authelia}"   # sobrescrito só nos laboratórios (T09.3.8)
+GREEN_LLDAP="${GREEN_LLDAP:-accessgateway-lldap}"            # T09.3.6: perfil "lldap" do compose
 GATEWAY_LOG_DIR="${GATEWAY_LOG_DIR:-$GATEWAY_ROOT/logs}"
 GATEWAY_PREP_ENV_BACKUP="$GATEWAY_ROOT/accessgateway.prep.env"
 CA_PUBLIC=/etc/homeautomation/certs/caddy-local-root.crt
@@ -162,6 +163,76 @@ blue_status() {
   return "$rc"
 }
 
+# Backend de usuários do Authelia da Green (T09.3.8): file (padrão) | ldap. Vem de GATEWAY_AUTH_BACKEND no arquivo de
+# ambiente — lido daqui mesmo quando o script não chamou load_env, para nenhum `up` voltar o Authelia ao backend file
+# por engano depois do cutover.
+auth_backend() {
+  local b="${GATEWAY_AUTH_BACKEND:-}"
+  [ -n "$b" ] || b=$(sed -n 's/^GATEWAY_AUTH_BACKEND=//p' "$GATEWAY_ENV_FILE" 2>/dev/null | tail -1 | tr -d "\"' \r")
+  case "${b:-file}" in
+    file|ldap) echo "${b:-file}" ;;
+    *) die "GATEWAY_AUTH_BACKEND inválido: $b (file|ldap)" ;;
+  esac
+}
+
+# Login no LLDAP de um usuário; a senha vem pela ENTRADA PADRÃO (nunca em argv, ambiente do host ou log).
+lldap_login() { # usuário → 0 se aceito
+  docker exec -i -e U="$1" "$GREEN_LLDAP" sh -c 'P=$(cat); jq -n --arg u "$U" --arg p "$P" "{username:\$u,password:\$p}" \
+    | curl -sf -o /dev/null -X POST -H "Content-Type: application/json" --data-binary @- http://localhost:17170/auth/simple/login'
+}
+
+# Pré-flight obrigatório antes de qualquer `up` com o backend LDAP (T09.3.7: um up com o LLDAP unhealthy recria o
+# Authelia e o deixa PARADO). Exige: container healthy, healthcheck executado agora e a conta de serviço autenticando.
+lldap_preflight() {
+  local h
+  h=$(docker inspect -f '{{if .State.Running}}{{if .State.Health}}{{.State.Health.Status}}{{else}}sem-healthcheck{{end}}{{else}}parado{{end}}' "$GREEN_LLDAP" 2>/dev/null || echo ausente)
+  [ "$h" = healthy ] || { warn "pré-flight: $GREEN_LLDAP está '$h' (exigido: healthy)"; return 1; }
+  docker exec "$GREEN_LLDAP" /app/lldap healthcheck --config-file /config/lldap_config.toml > /dev/null 2>&1 \
+    || { warn "pré-flight: healthcheck do LLDAP falhou agora"; return 1; }
+  [ -s "$GATEWAY_ROOT/secrets/authelia/LDAP_PASSWORD" ] || { warn "pré-flight: secrets/authelia/LDAP_PASSWORD ausente"; return 1; }
+  lldap_login authelia < "$GATEWAY_ROOT/secrets/authelia/LDAP_PASSWORD" \
+    || { warn "pré-flight: a conta de serviço 'authelia' não autentica no LLDAP"; return 1; }
+  log "pré-flight do LLDAP: healthy, healthcheck ok, conta de serviço autentica"
+}
+
+# Compose da Green. Com o backend ldap: + compose.lldap.yml e o perfil lldap, e pré-flight antes de todo `up`.
+# GATEWAY_COMPOSE_TEST_OVERRIDE: override de isolamento, SÓ nos laboratórios.
+# Um `up` que não recria o Authelia dispensa o pré-flight: `--no-deps` citando o caddy e NÃO citando authelia/lldap
+# (ex.: green-caddy-recreate.sh). Qualquer outro `up`, inclusive sem nome de serviço, passa pelo pré-flight.
+up_touches_authelia() {
+  # (nomes sem "caddy"/"root" soltos: o shellcheck lê `NAME=caddy-root.crt` de outros scripts como aritmética)
+  local arg no_deps=0 names_gateway_proxy=0 names_auth_or_directory=0
+  for arg in "$@"; do
+    case "$arg" in
+      --no-deps) no_deps=1 ;;
+      caddy) names_gateway_proxy=1 ;;
+      authelia|lldap) names_auth_or_directory=1 ;;
+    esac
+  done
+  [ "$no_deps" = 1 ] && [ "$names_gateway_proxy" = 1 ] && [ "$names_auth_or_directory" = 0 ] && return 1
+  return 0
+}
+
 compose_green() {
-  docker compose --env-file "$GATEWAY_ENV_FILE" --project-directory "$GATEWAY_APP_DIR" -f "$GATEWAY_APP_DIR/compose.yml" "$@"
+  local files=(-f "$GATEWAY_APP_DIR/compose.yml") flags=() proj=()
+  if [ "$(auth_backend)" = ldap ]; then
+    files+=(-f "$GATEWAY_APP_DIR/compose.lldap.yml")
+    flags=(--profile lldap)
+    if [ "${1:-}" = up ] && up_touches_authelia "$@"; then
+      lldap_preflight || die "pré-flight do LLDAP falhou: nada foi recriado (o Authelia ficaria parado; T09.3.7)"
+    fi
+  fi
+  # Só nos laboratórios: override de isolamento e projeto próprio (nunca definidos em produção).
+  [ -z "${GATEWAY_COMPOSE_TEST_OVERRIDE:-}" ] || files+=(-f "$GATEWAY_COMPOSE_TEST_OVERRIDE")
+  [ -z "${GATEWAY_COMPOSE_PROJECT:-}" ] || proj=(-p "$GATEWAY_COMPOSE_PROJECT")
+  docker compose "${proj[@]}" --env-file "$GATEWAY_ENV_FILE" --project-directory "$GATEWAY_APP_DIR" "${files[@]}" "${flags[@]}" "$@"
+}
+
+# Compose só do LLDAP (perfil lldap), independente do backend do Authelia: iniciar ou parar o LLDAP nunca recria o
+# Authelia (sem depends_on do LLDAP para o Authelia no compose.yml).
+compose_lldap() {
+  local files=(-f "$GATEWAY_APP_DIR/compose.yml") proj=()
+  [ -z "${GATEWAY_COMPOSE_TEST_OVERRIDE:-}" ] || files+=(-f "$GATEWAY_COMPOSE_TEST_OVERRIDE")
+  [ -z "${GATEWAY_COMPOSE_PROJECT:-}" ] || proj=(-p "$GATEWAY_COMPOSE_PROJECT")
+  docker compose "${proj[@]}" --env-file "$GATEWAY_ENV_FILE" --project-directory "$GATEWAY_APP_DIR" "${files[@]}" --profile lldap "$@"
 }

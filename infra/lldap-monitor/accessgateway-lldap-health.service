@@ -1,0 +1,18 @@
+[Unit]
+Description=Saúde do LLDAP do AccessGateway, independente do Authelia (T09.3.8)
+Documentation=file:///srv/accessgateway/app/docs/T09.3.8-relatorio.md
+After=docker.service
+Requires=docker.service
+ConditionPathExists=/etc/accessgateway/lldap-kuma-push.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/accessgateway-lldap-health
+# Só executa docker exec no container do LLDAP e um curl ao Kuma; lê a senha da conta de serviço
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/srv/accessgateway/secrets
+ProtectKernelTunables=true
+ProtectControlGroups=true

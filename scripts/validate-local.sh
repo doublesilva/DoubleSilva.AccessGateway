@@ -13,9 +13,10 @@
 #   8. shellcheck dos scripts e varredura de segredos (gitleaks);
 #   9. LLDAP no perfil "lldap" (T09.3.6): compose real, backup, restauração isolada e fail-closed da seed;
 #  10. Authelia + LLDAP pelo compose (T09.3.7): overlay compose.lldap.yml com a configuração real de cutover.
+#  11. Monitoramento do LLDAP e migração file -> LLDAP com rollback (T09.3.8).
 #
 # Uso: scripts/validate-local.sh            (todas)
-#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lldap authelialdap lint
+#      scripts/validate-local.sh caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lldap authelialdap lldapmonitor backendswitch lint
 set -Eeuo pipefail
 
 export MSYS_NO_PATHCONV=1
@@ -227,6 +228,24 @@ check_authelialdap() {
     ok "$(grep -c '\[PASS\]' .tmp/t09.3.7/harness.log) verificações do harness e $(grep -c '\[PASS\]' .tmp/t09.3.7/run.log) do script; $(tail -1 .tmp/t09.3.7/run.log | cut -c10-)"
   else
     bad "Authelia + LLDAP: $(grep -h -E '\[FAIL\]' .tmp/t09.3.7/run.log .tmp/t09.3.7/harness.log | head -5)"
+  fi
+}
+
+check_lldapmonitor() {
+  step "Monitoramento do LLDAP (T09.3.8): verificador independente do Authelia, docker/curl simulados"
+  if docker run --rm --network none -v "$REPO:/repo:ro" "$UBUNTU_IMAGE" bash /repo/tests/lldap-monitor/lldap-monitor-test.sh > "$TMP/lldapmonitor.out" 2>&1; then
+    ok "lldap-monitor: $(tail -1 "$TMP/lldapmonitor.out")"
+  else
+    bad "lldap-monitor: $(grep -E '^\[FAIL\]' "$TMP/lldapmonitor.out" | head -5)"
+  fi
+}
+
+check_backendswitch() {
+  step "Migração file -> LLDAP (T09.3.8): cutover, pré-flight, reversão automática, restauração e rollback com os scripts reais"
+  if tests/backend-switch/run.sh > "$TMP/backendswitch.out" 2>&1; then
+    ok "$(grep -c '\[PASS\]' .tmp/t09.3.8/run.log) verificações do script e $(grep -c '\[PASS\]' .tmp/t09.3.8/harness.log) do harness; $(tail -1 .tmp/t09.3.8/run.log | cut -c10-)"
+  else
+    bad "migração: $(grep -h -E '\[FAIL\]' .tmp/t09.3.8/run.log .tmp/t09.3.8/harness.log | head -5)"
   fi
 }
 
@@ -668,9 +687,9 @@ check_lint() {
       -x -P SCRIPTDIR -S warning scripts/*.sh scripts/lib/*.sh scripts/inventory/*.sh tests/ca/*.sh \
       tests/cutover/*.sh tests/cutover/stubs/* tests/smoke/*.sh tests/smoke/stubs/* infra/home-smoke-test/home-smoke-test infra/home-smoke-test/install.sh infra/home-smoke-test/smoke-paths.sh \
       tests/status-dashboard/*.sh tests/status-dashboard/stubs/* tests/public-ca/*.sh \
-      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh tests/backup-coverage/*.sh tests/ca-distribute/*.sh tests/lldap/*.sh tests/authelia-lldap/*.sh \
+      tests/caddy-recreate/*.sh tests/caddy-recreate/stubs/* tests/ca-copies/*.sh tests/backup-coverage/*.sh tests/ca-distribute/*.sh tests/lldap/*.sh tests/authelia-lldap/*.sh tests/backend-switch/*.sh tests/lldap-monitor/*.sh \
       infra/home-server-backup/install-conf.sh infra/uptime-kuma/kuma-ca-migrate.sh infra/uptime-kuma/kuma-auth.sh tests/uptime-kuma/*.sh tests/uptime-kuma/stubs/* \
-      infra/restore-drill/restore-drill.sh \
+      infra/restore-drill/restore-drill.sh infra/lldap-monitor/install.sh infra/lldap-monitor/lldap-health-push \
       tests/deploy-homeautomation/*.sh infra/deploy-homeautomation/install.sh \
       infra/accessgateway-status-sync/accessgateway-status-sync infra/accessgateway-status-sync/install.sh \
       infra/home-server-backup/backup-home-server infra/home-server-backup/tests/*.sh \
@@ -701,7 +720,7 @@ check_lint() {
   fi
 }
 
-for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lldap authelialdap lint}"; do
+for section in "${@:-caddy authelia compose snapshot ca e2e cutover smoke status publicca recreate deployha cacopies coverage cadistribute kuma kumaauth restoredrill lldap authelialdap lldapmonitor backendswitch lint}"; do
   for s in $section; do "check_$s"; done
 done
 

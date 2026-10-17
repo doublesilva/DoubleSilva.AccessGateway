@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Monitoramento de saúde do LLDAP, INDEPENDENTE do Authelia (T09.3.8). Preparado; instalado por install.sh.
+#
+# Fala só com o container do LLDAP (docker exec): nada passa pelo Authelia nem exige login no portal. Verifica:
+#   1. container em execução e com healthcheck "healthy";
+#   2. healthcheck do LLDAP executado agora (LDAP + GraphQL);
+#   3. a CONTA DE SERVIÇO que o Authelia usa autentica com o segredo atual (detecta divergência de senha: o LLDAP pode
+#      estar saudável e o Authelia mesmo assim não conseguir iniciar nem validar sessões).
+# Resultado enviado ao Uptime Kuma (monitor "Push"): status=up|down e msg curta. Se este script (ou o timer) parar, o
+# Kuma marca o monitor como fora pelo próprio intervalo do push. A URL fica num arquivo root-only e nunca é impressa.
+#
+# Saída: 0 saudável; 1 problema no LLDAP (enviou status=down); 2 falha ao enviar ao Kuma.
+# Variáveis: KUMA_PUSH_CONFIG (formato curl --config, linha url = "..."), GATEWAY_ROOT, GREEN_LLDAP,
+#            LLDAP_MONITOR_DRY_RUN=1 (não envia; só imprime o resultado — testes), KUMA_CACERT.
+set -Eeuo pipefail
+
+GATEWAY_ROOT="${GATEWAY_ROOT:-/srv/accessgateway}"
+GREEN_LLDAP="${GREEN_LLDAP:-accessgateway-lldap}"
+KUMA_PUSH_CONFIG="${KUMA_PUSH_CONFIG:-/etc/accessgateway/lldap-kuma-push.conf}"
+KUMA_CACERT="${KUMA_CACERT:-/etc/homeautomation/certs/caddy-local-root.crt}"
+LDAP_PASSWORD_FILE="$GATEWAY_ROOT/secrets/authelia/LDAP_PASSWORD"
+
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+START=$(date +%s%3N)
+
+status=up
+msg=ok
+fail() { status=down; msg=$1; }
+
+health=$(docker inspect -f '{{if .State.Running}}{{if .State.Health}}{{.State.Health.Status}}{{else}}sem-healthcheck{{end}}{{else}}parado{{end}}' "$GREEN_LLDAP" 2>/dev/null || echo ausente)
+if [ "$health" != healthy ]; then
+  fail "container-$health"
+elif ! docker exec "$GREEN_LLDAP" /app/lldap healthcheck --config-file /config/lldap_config.toml > /dev/null 2>&1; then
+  fail healthcheck-falhou
+elif [ ! -s "$LDAP_PASSWORD_FILE" ]; then
+  fail senha-de-servico-ausente
+elif ! docker exec -i -e U=authelia "$GREEN_LLDAP" sh -c 'P=$(cat); jq -n --arg u "$U" --arg p "$P" "{username:\$u,password:\$p}" \
+      | curl -sf -o /dev/null -X POST -H "Content-Type: application/json" --data-binary @- http://localhost:17170/auth/simple/login' \
+      < "$LDAP_PASSWORD_FILE" > /dev/null 2>&1; then
+  fail conta-de-servico-recusada
+fi
+
+ping=$(( $(date +%s%3N) - START ))
+log "LLDAP: $status ($msg, ${ping} ms)"
+
+if [ "${LLDAP_MONITOR_DRY_RUN:-}" = 1 ]; then
+  log "dry-run: nada enviado ao Kuma"
+  [ "$status" = up ]
+  exit $?
+fi
+
+[ -s "$KUMA_PUSH_CONFIG" ] || { log "ERRO: arquivo de push ausente: $KUMA_PUSH_CONFIG"; exit 2; }
+cacert=()
+[ -r "$KUMA_CACERT" ] && cacert=(--cacert "$KUMA_CACERT")
+# --config: a URL (com o token) não aparece em argv nem na saída; --get envia os dados na query do push.
+if ! curl -sS --max-time 10 --fail -o /dev/null --config "$KUMA_PUSH_CONFIG" "${cacert[@]}" --get \
+     --data-urlencode "status=$status" --data-urlencode "msg=$msg" --data-urlencode "ping=$ping" 2>/dev/null; then
+  log "ERRO: não foi possível enviar o resultado ao Kuma"
+  exit 2
+fi
+log "enviado ao Kuma: status=$status"
+[ "$status" = up ]

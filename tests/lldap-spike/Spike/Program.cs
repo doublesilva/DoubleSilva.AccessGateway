@@ -53,6 +53,10 @@ try
             Report.Log($"bind LDAP em {args[1]} como {args[2]}: {(ok ? "ACEITO" : "RECUSADO")}");
             report.Check($"bind em {args[1]} como {args[2]} {(args.Length > 4 ? args[4] : "aceito")}", ok == (args.Length <= 4 || args[4] != "recusado"), ok ? "aceito" : "recusado");
             break;
+        case var sw when sw.StartsWith("sw-", StringComparison.Ordinal):
+            // T09.3.8: troca de backend (cutover para o LLDAP, restauração e rollback para o file).
+            await new SwitchValidation(http, env, report).Run(mode);
+            break;
         case var cv when cv.StartsWith("cv-", StringComparison.Ordinal):
             // T09.3.7: Authelia + LLDAP pelo compose preparado, com a configuração real.
             await new ComposeValidation(http, env, report).Run(mode, args.Skip(1).ToArray());
