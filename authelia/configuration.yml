@@ -196,6 +196,7 @@ identity_providers:
         # Somente desenvolvimento por enquanto; callback de produção pendente.
         redirect_uris:
           - 'http://localhost:5173/signin-oidc'
+          - https://saldo360.home.doublesilva.com/signin-oidc
         scopes:
           - 'openid'
           - 'profile'
