@@ -66,7 +66,7 @@ put_back_previous() { # volta ao banco guardado
 log "parando só o LLDAP (o Authelia continua; logins novos falham até o fim)"
 compose_lldap stop lldap > /dev/null
 for f in users.db users.db-wal users.db-shm; do
-  [ ! -e "$DATA_DIR/$f" ] || cp -p "$DATA_DIR/$f" "$KEEP/$f"
+  [ ! -e "$DATA_DIR/$f" ] || { install -m 600 "$DATA_DIR/$f" "$KEEP/$f"; [ "${ALLOW_NON_ROOT:-}" = 1 ] || chown root:root "$KEEP/$f"; }
 done
 log "banco atual guardado em $KEEP"
 rm -f "$DATA_DIR/users.db-wal" "$DATA_DIR/users.db-shm"

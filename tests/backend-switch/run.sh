@@ -30,9 +30,12 @@ pass() { log "[PASS] $1"; }
 fail() { log "[FAIL] $1"; FAIL=1; }
 check() { local d=$1; shift; if "$@" > /dev/null 2>&1; then pass "$d"; else fail "$d"; fi; }
 
+# Linux como root (T09.3.8a): sem ALLOW_NON_ROOT, com o provisionamento real (donos e modos de produção, uid/gid 1000).
+REAL=0; [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] && [ "${LAB_FAKE_PERMS:-}" != 1 ] && REAL=1
 LABENV=(GATEWAY_ROOT="$ROOT" GATEWAY_APP_DIR="$HR" GATEWAY_ENV_FILE="$ROOT/accessgateway.env"
         GREEN_AUTHELIA="$A" GREEN_LLDAP="$L" GATEWAY_COMPOSE_TEST_OVERRIDE="$HR/tests/backend-switch/compose.test.yml"
-        GATEWAY_COMPOSE_PROJECT=agswitch ALLOW_NON_ROOT=1 GATEWAY_WAIT_TIMEOUT=60 LLDAP_UID="$(id -u)" LLDAP_GID="$(id -g)")
+        GATEWAY_COMPOSE_PROJECT=agswitch GATEWAY_WAIT_TIMEOUT=60)
+if [ "$REAL" = 1 ]; then LABENV+=(LLDAP_UID=1000 LLDAP_GID=1000); else LABENV+=(ALLOW_NON_ROOT=1 LLDAP_UID="$(id -u)" LLDAP_GID="$(id -g)"); fi
 lab() { env "${LABENV[@]}" "$@"; }
 sw() { lab bash scripts/authelia-backend.sh "$@"; }           # saída em $OUT/scripts.log (varredura de vazamentos)
 swlog() { sw "$@" 2>&1 | tee -a "$OUT/scripts.log"; return "${PIPESTATUS[0]}"; }
@@ -76,9 +79,15 @@ h() { harness "$@" || FAIL=1; }
 # ------------------------------------------------------------------------------------------------ P0
 mkdir -p "$OUT"; : > "$OUT/run.log"; : > "$OUT/harness.log"; : > "$OUT/scripts.log"
 rm -rf "$T"
-mkdir -p "$R/backups" "$R/data/authelia" "$R/data/lldap" "$R/secrets/lldap" "$R/secrets/authelia/oidc/clients" "$R/secrets/migration" "$T/state"
+mkdir -p "$R/backups" "$R/data/authelia" "$R/secrets/authelia/oidc/clients" "$R/secrets/migration" "$T/state"
+[ "$REAL" = 1 ] || mkdir -p "$R/data/lldap" "$R/secrets/lldap"
 log "P0: preparação (segredos e usuários fictícios; harness)"
-rnd > "$R/secrets/lldap/KEY_SEED"; rnd > "$R/secrets/lldap/JWT_SECRET"; rnd | cut -c1-32 > "$R/secrets/lldap/ADMIN_PASSWORD"
+if [ "$REAL" = 1 ]; then
+  lab bash scripts/lldap-provision.sh > "$T/provision.log" 2>&1 && lab bash scripts/lldap-provision.sh --check > "$T/provision-check.log" 2>&1 \
+    && pass "Linux/root: lldap-provision.sh real (donos e modos de produção) e --check" || fail "provisionamento real: $(tail -3 "$T/provision.log")"
+else
+  rnd > "$R/secrets/lldap/KEY_SEED"; rnd > "$R/secrets/lldap/JWT_SECRET"; rnd | cut -c1-32 > "$R/secrets/lldap/ADMIN_PASSWORD"
+fi
 for s in JWT_SECRET SESSION_SECRET STORAGE_ENCRYPTION_KEY; do rnd > "$R/secrets/authelia/$s"; done
 rnd > "$R/secrets/authelia/oidc/hmac_secret"
 CLIENT_SECRET=$(rnd)
@@ -162,6 +171,19 @@ prompt joao 'Lab-Prompt-joao-2\nLab-Prompt-joao-2\n' --reset-password && lldap_p
 printf 'senha-gerada-antes-xxxxxxxx' > "$R/secrets/migration/rita.password"
 prompt rita 'Lab-Prompt-rita-1\nLab-Prompt-rita-1\n' && [ ! -e "$R/secrets/migration/rita.password" ] && lldap_pw_ok rita Lab-Prompt-rita-1 \
   && pass "prompt: rita criada; o arquivo de senha gerada antes foi removido (não pode enganar)" || fail "rita: $(tail -3 "$T/prompt.log")"
+if [ "$REAL" = 1 ]; then
+  # Terminal de verdade (pty com /dev/tty), sem LLDAP_MIGRATE_TTY: a senha é digitada sem eco e não chega a argv/log.
+  PTY=(python3 tests/backend-switch/pty_drive.py "$T/pty.out")
+  TTYRC=0; "${PTY[@]}" 'mín. 12): =Lab-Tty-rita-1' 'Repita: =Lab-Tty-rita-1' -- env "${LABENV[@]}" bash scripts/lldap-migrate.sh users --only rita --password-mode prompt --reset-password > /dev/null 2>&1 || TTYRC=$?
+  [ "$TTYRC" = 0 ] && lldap_pw_ok rita Lab-Tty-rita-1 && ! lldap_pw_ok rita Lab-Prompt-rita-1 \
+    && pass "TTY real: senha digitada no terminal valeu (redefinição de rita) e a anterior deixou de valer" || fail "TTY real: rc=$TTYRC $(tr -d '\r' < "$T/pty.out" | tail -3)"
+  grep -q 'Nova senha para rita' "$T/pty.out" && ! grep -qF 'Lab-Tty-rita-1' "$T/pty.out" \
+    && pass "TTY real: o prompt apareceu e a senha NÃO foi ecoada no terminal" || fail "TTY real: eco da senha ou prompt ausente"
+  TTYRC=0; "${PTY[@]}" 'mín. 12): =Lab-Tty-rita-2' 'Repita: =Lab-Tty-rita-X' -- env "${LABENV[@]}" bash scripts/lldap-migrate.sh users --only rita --password-mode prompt --reset-password > /dev/null 2>&1 || TTYRC=$?
+  [ "$TTYRC" != 0 ] && [ "$TTYRC" != 124 ] && grep -q "não conferem" "$T/pty.out" && lldap_pw_ok rita Lab-Tty-rita-1 \
+    && pass "TTY real: confirmação diferente recusada e a senha de rita não mudou" || fail "TTY real (confirmação): rc=$TTYRC"
+  ! grep -rqF 'Lab-Tty-rita' "$OUT/scripts.log" "$T"/*.log 2> /dev/null && pass "TTY real: a senha digitada não aparece em nenhum log" || fail "senha digitada no terminal vazou em log"
+fi
 
 PW_SHA=$(cat "$R"/secrets/migration/*.password | sha256sum)
 M3_RC=0
@@ -299,6 +321,29 @@ if swlog to-file --apply > "$T/p9.log" 2>&1; then pass "to-file --apply concluí
 [ "$(health "$L")" = healthy ] && pass "o LLDAP continua no ar (sem uso); dados preservados" || fail "LLDAP: $(health "$L")"
 grep -q 'identificadores OIDC preservados' "$T/p9.log" && pass "script: sub OIDC preservados no rollback" || fail "sem a verificação dos sub no rollback"
 h sw-file-after
+
+# ------------------------------------------------------------------------------------------------ permissões (Linux/root)
+if [ "$REAL" = 1 ]; then
+  log "permissões: donos e modos dos arquivos criados pelos scripts"
+  perm() { # arquivo dono:grupo modo
+    [ "$(stat -c '%U:%G %a' "$1" 2> /dev/null)" = "$2 $3" ] && pass "modo $3 $2: ${1#"$R"/}" || fail "modo/dono de ${1#"$R"/}: $(stat -c '%U:%G %a' "$1" 2> /dev/null || echo ausente) (esperado $2 $3)"
+  }
+  LU=$(stat -c '%U:%G' "$R/data/lldap")
+  [ "$(stat -c '%u:%g' "$R/data/lldap")" = 1000:1000 ] && pass "dados do LLDAP pertencem a 1000:1000" || fail "dono dos dados do LLDAP: $LU"
+  perm "$R/data/lldap" "$LU" 700
+  perm "$R/data/lldap/users.db" "$LU" 600
+  perm "$R/secrets/lldap" "$LU" 500
+  for f in KEY_SEED JWT_SECRET ADMIN_PASSWORD; do perm "$R/secrets/lldap/$f" "$LU" 400; done
+  perm "$R/secrets/authelia/LDAP_PASSWORD" root:root 600
+  perm "$R/secrets/migration" root:root 700
+  for f in "$R"/secrets/migration/*.password; do perm "$f" root:root 600; done
+  BAD=$(find "$R/secrets/migration" "$R/backups" -type f -perm /077 2> /dev/null | head -3)
+  [ -z "$BAD" ] && pass "backups e secrets/migration: nenhum arquivo legível por grupo/outros" || fail "arquivos abertos demais: $BAD"
+  BAD=$(find "$R/backups" -mindepth 1 -type d ! -perm 700 2> /dev/null | head -3)
+  [ -z "$BAD" ] && pass "diretórios de evidência/backup: todos 700" || fail "diretórios abertos: $BAD"
+  [ "$(stat -c '%U:%G %a' "$R/accessgateway.env")" = "root:root 644" ] && pass "accessgateway.env mantém dono e modo após as trocas atômicas de backend" || fail "accessgateway.env: $(stat -c '%U:%G %a' "$R/accessgateway.env")"
+  lab bash scripts/lldap-provision.sh --check > /dev/null 2>&1 && pass "lldap-provision.sh --check continua válido após cutover, restauração e rollback" || fail "provision --check após o fluxo"
+fi
 
 # ------------------------------------------------------------------------------------------------ varredura
 log "varredura: nenhuma senha, seed ou token nos logs do laboratório"
